@@ -142,7 +142,7 @@ def build_daily_input(ws):
     ws["A1"].font = Font(bold=True, size=14)
 
     rows = [
-        ("日付", "例: 令和7年4月17日"),
+        ("当番日 (yyyy/m/d)", "2026/4/16"),
         ("曜日", "木"),
         ("部", "3部"),
         ("当直主任", "氏名"),
@@ -155,6 +155,8 @@ def build_daily_input(ws):
         ws.cell(row=r, column=1).border = BORDER_ALL
         c = ws.cell(row=r, column=2, value=val)
         style_input(c)
+        if label.startswith("当番日"):
+            c.number_format = "yyyy/m/d"
         r += 1
 
     # リスト入力（食当、休暇、研修、救助訓練期間）
@@ -188,26 +190,34 @@ def openpyxl_col(letter):
     return column_index_from_string(letter)
 
 
-def build_prev_day(ws):
-    """前日実績シート: 前日の通信/受付 一次指定者（ローテと深夜重複防止用）"""
-    ws.title = "前日実績"
-    ws["A1"] = "前日の一次指定者（ローテ基準と深夜重複チェック用）"
+def build_history(ws):
+    """履歴シート: 過去の当番日の一次指定者を累積保存 (長形式)"""
+    ws.title = "履歴"
+    ws["A1"] = "過去当番の一次指定者 (GenerateShift 実行時に自動追記される)"
     ws["A1"].font = Font(bold=True, size=12)
+    ws["A2"] = ("月初に前月分をここに貼り付ける。"
+                "列構成: 当番日 / 時間帯 / 通信指令 / 受付。"
+                "1当番につき25行。")
+    ws["A2"].font = Font(italic=True, size=10)
 
-    headers = ["時間帯", "通信指令 一次指定者", "受付 一次指定者"]
+    headers = ["当番日", "時間帯", "通信指令", "受付"]
     for i, h in enumerate(headers, start=1):
-        c = ws.cell(row=3, column=i, value=h)
+        c = ws.cell(row=4, column=i, value=h)
         style_header(c)
-    for i, slot in enumerate(TIME_SLOTS, start=4):
-        ws.cell(row=i, column=1, value=slot).border = BORDER_ALL
-        ws.cell(row=i, column=1).alignment = ALIGN_CENTER
-        for col in (2, 3):
-            cell = ws.cell(row=i, column=col)
-            style_input(cell)
 
-    ws.column_dimensions["A"].width = 12
-    ws.column_dimensions["B"].width = 22
-    ws.column_dimensions["C"].width = 22
+    # 日付列は日付フォーマット
+    for r in range(5, 5 + 400):  # 400行（約16当番分）のプレ確保
+        ws.cell(row=r, column=1).number_format = "yyyy/m/d"
+        for cc in range(1, 5):
+            ws.cell(row=r, column=cc).border = BORDER_ALL
+
+    ws.column_dimensions["A"].width = 14
+    ws.column_dimensions["B"].width = 12
+    ws.column_dimensions["C"].width = 20
+    ws.column_dimensions["D"].width = 20
+
+    # 上部をフリーズ
+    ws.freeze_panes = "A5"
 
 
 def build_settings(ws):
@@ -305,8 +315,19 @@ def build_output(ws):
     ws.merge_cells("A1:G1")
     ws["A1"].alignment = ALIGN_CENTER
 
-    ws["H1"] = "=当日入力!B3 & \"  \" & 当日入力!B4 & \"  \" & 当日入力!B5"
-    ws["H1"].alignment = ALIGN_CENTER
+    # 表示日付 (履歴再表示用、生成時はマクロが書き込む)
+    ws["A2"] = "表示日付"
+    ws["A2"].font = FONT_BOLD
+    ws["A2"].border = BORDER_ALL
+    ws["A2"].alignment = ALIGN_CENTER
+    ws["B2"].number_format = "yyyy/m/d"
+    ws["B2"].alignment = ALIGN_CENTER
+    ws["B2"].border = BORDER_ALL
+    ws["B2"].fill = FILL_INPUT
+    ws["C2"] = "← 過去日を入力して ShowDateFromHistory ボタンで過去の表示可"
+    ws["C2"].alignment = ALIGN_LEFT
+    ws["C2"].font = Font(italic=True, size=9)
+    ws.merge_cells("C2:G2")
 
     # 2段ヘッダ: 事務区分 / 通信指令 (一次指定者 | 指定変更[従事者|時間]) / 受付 (〃)
     # 「指定変更」列は手書き用で空欄。
@@ -368,37 +389,46 @@ def build_help(ws):
     lines = [
         "【執務表自動化 使い方】",
         "",
-        "1. 名簿シートに3部員の氏名と役職カテゴリを入力する (最大30名まで)",
+        "◆ 月初の準備 (月1回だけ)",
+        " 1. 履歴シートに前月分の一次指定者をコピペ (当番日×25行ずつ縦に並ぶ)",
+        "    - 前月末の当番日が残っていれば、最初の当番でも自動でローテできる",
+        "",
+        "◆ 毎当番の作業 (ボタン1回)",
+        " 1. 当日入力シート",
+        "    - 当番日を yyyy/m/d 形式で更新",
+        "    - 食当・休暇・研修・救助訓練・警防力の氏名を更新",
+        "    - 当直主任/副主任を更新",
+        " 2. 執務表シートのボタン「本日を生成」を押す",
+        "    → 履歴の最新日を「前日」として読み込み、自動で一次指定者が埋まる",
+        "    → 生成結果は履歴に自動追記される",
+        " 3. 指定変更欄は空欄のまま。出場時の代打を手書き",
+        " 4. 印刷 or Word様式にコピペ",
+        "",
+        "◆ 過去の日を見たい場合",
+        " - 執務表シートの「表示日付 (B2)」に yyyy/m/d を書いて",
+        "   ボタン「表示日付を反映」を押す (マクロ ShowDateFromHistory)",
+        "",
+        "◆ 名簿の更新",
+        " 1. 名簿シートに3部員の氏名と役職カテゴリを入力 (最大30名)",
         "   - 役職カテゴリは C列のドロップダウンから選択",
         "   - 指揮者/情報員/伝令/通信担当/機関員/一般/警防力/救助隊 の8区分",
         "",
-        "2. 当日入力シートに日付・食当・休暇・研修・救助訓練者・警防力を入力",
-        "   - 休日フラグは 1=休日 / 0=平日",
-        "   - 氏名は名簿と完全一致させる (コピペ推奨)",
-        "",
-        "3. 前日実績シートに前日の通信/受付 一次指定者を転記",
-        "   - 今日の生成で「1つ上にずらす」「夜20時以降の重複回避」に使う",
-        "   - 前日分は前回生成した執務表からコピペでOK",
-        "",
-        "4. 設定シートで時間枠×役職の割当可否を確認/調整 (通常は初期値でOK)",
-        "",
-        "5. 執務表シートのボタン(またはマクロ実行)で GenerateShift を実行",
-        "   - 自動で一次指定者が埋まる",
-        "   - 指定変更欄は空欄のまま。出場時の代打を手書きで追記",
-        "",
-        "6. 印刷 or Word 様式にコピペして提出",
+        "◆ 制約を変えたい場合",
+        " - 禁止時間帯 → 設定シートのマスを × / △ / 空白 で編集",
+        " - 食当・救助訓練期間・警防力 → 当日入力シートで変える",
         "",
         "■ 初回セットアップ (VBAマクロ導入)",
         " a) このファイルを「名前を付けて保存」→ Excel マクロ有効ブック(.xlsm)",
         " b) Alt+F11 で VBE を開く",
         " c) [ファイル]→[ファイルのインポート] で ShiftScheduler.bas を選ぶ",
-        " d) 執務表シートに [開発]タブ→[挿入]→[ボタン] で図形を置き",
-        "    マクロ「GenerateShift」を割り当てる",
-        " e) 以後、ボタンを押すと自動生成される",
+        " d) 執務表シートに [開発]タブ→[挿入]→[ボタン] で図形を2つ置き",
+        "    - ボタン1: マクロ「GenerateShift」",
+        "    - ボタン2: マクロ「ShowDateFromHistory」",
         "",
-        "■ 制約を変えたい場合",
-        " ・禁止時間帯の追加/削除 → 設定シートのマスを × / △ / 空白 で編集",
-        " ・食当・救助訓練期間・警防力 は当日入力シートで変えられる",
+        "◆ 履歴シートの扱い",
+        " - 自動追記なので基本触らない",
+        " - 月初に前月分を貼り付ける (列: 当番日/時間帯/通信指令/受付、1当番=25行)",
+        " - 間違えて追記された日があれば、該当25行を削除すればOK",
     ]
     for i, line in enumerate(lines, start=1):
         ws.cell(row=i, column=1, value=line)
@@ -417,8 +447,8 @@ def main():
     ws_roster = wb.create_sheet()
     build_roster(ws_roster)
 
-    ws_prev = wb.create_sheet()
-    build_prev_day(ws_prev)
+    ws_history = wb.create_sheet()
+    build_history(ws_history)
 
     ws_settings = wb.create_sheet()
     build_settings(ws_settings)
@@ -426,8 +456,8 @@ def main():
     ws_help = wb.create_sheet()
     build_help(ws_help)
 
-    # シート順を並び替え: 執務表 / 当日入力 / 名簿 / 前日実績 / 設定 / 使い方
-    wb._sheets = [ws_output, ws_input, ws_roster, ws_prev, ws_settings, ws_help]
+    # シート順: 執務表 / 当日入力 / 名簿 / 履歴 / 設定 / 使い方
+    wb._sheets = [ws_output, ws_input, ws_roster, ws_history, ws_settings, ws_help]
 
     wb.save(OUT_PATH)
     print(f"生成: {OUT_PATH}")

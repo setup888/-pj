@@ -9,11 +9,11 @@ Option Explicit
 Private Const SHEET_OUT As String = "執務表"
 Private Const SHEET_INPUT As String = "当日入力"
 Private Const SHEET_ROSTER As String = "名簿"
-Private Const SHEET_PREV As String = "前日実績"
+Private Const SHEET_HISTORY As String = "履歴"
 Private Const SHEET_SET As String = "設定"
 
 Private Const ROW_SLOT_START As Long = 5      ' 執務表/設定 の時間枠開始行
-Private Const ROW_PREV_START As Long = 4      ' 前日実績 の時間枠開始行
+Private Const ROW_HIST_START As Long = 5      ' 履歴 のデータ開始行
 Private Const N_SLOTS As Long = 25            ' 時間枠数
 
 ' 時間枠インデックス定数 (0 origin)
@@ -42,7 +42,14 @@ Public Sub GenerateShift()
     End If
 
     Dim daily As Object:     Set daily = LoadDailyInput()
-    Dim prevDay As Object:   Set prevDay = LoadPrevDay()
+    Dim todayDate As Date
+    If Not IsDate(daily("当番日")) Then
+        MsgBox "当日入力シートの B3 に当番日 (yyyy/m/d) を入力してください。", vbExclamation
+        GoTo DONE_EXIT
+    End If
+    todayDate = CDate(daily("当番日"))
+
+    Dim prevDay As Object:   Set prevDay = LoadPrevDayFromHistory(todayDate)
     Dim settings As Object:  Set settings = LoadSettings()        ' (slot|role) -> mark
 
     Dim slots() As String:   slots = ReadTimeSlots()
@@ -76,15 +83,19 @@ Public Sub GenerateShift()
     Call EnforceDistinct12_17(assign, members, roster, daily, settings, slots)
 
     ' 出力
-    Call WriteOutput(assign, slots)
+    Call WriteOutput(assign, slots, todayDate)
+
+    ' 履歴に追記 (既存同日分は上書き)
+    Call AppendToHistory(assign, slots, todayDate)
 
     ' 検証 & 警告コメント
     Dim warnings As String
     warnings = Validate(assign, roster, daily, prevDay, slots)
     If Len(warnings) > 0 Then
-        MsgBox "生成完了。以下の注意点を確認してください:" & vbCrLf & warnings, vbInformation
+        MsgBox "生成完了。履歴にも追記しました。" & vbCrLf & vbCrLf & _
+               "以下の注意点を確認してください:" & vbCrLf & warnings, vbInformation
     Else
-        MsgBox "生成完了。", vbInformation
+        MsgBox "生成完了。履歴にも追記しました。", vbInformation
     End If
 
 DONE_EXIT:
@@ -117,7 +128,7 @@ Private Function LoadDailyInput() As Object
     Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
     d.CompareMode = vbTextCompare
     Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_INPUT)
-    d("日付") = ws.Range("B3").Value
+    d("当番日") = ws.Range("B3").Value
     d("曜日") = ws.Range("B4").Value
     d("部") = ws.Range("B5").Value
     d("当直主任") = ws.Range("B6").Value
@@ -146,18 +157,69 @@ Private Function ReadNameList(ws As Worksheet, colIdx As Long) As Object
     Set ReadNameList = s
 End Function
 
-Private Function LoadPrevDay() As Object
-    ' slot -> Variant array(2): 0=通信, 1=受付
+Private Function LoadPrevDayFromHistory(beforeDate As Date) As Object
+    ' 履歴シートから beforeDate より前の最新当番日のレコードを返す
+    ' 戻り値: slot_index -> Variant array(0=通信, 1=受付)
     Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
-    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_PREV)
+    Dim i As Long
+    ' 空で初期化
+    For i = 0 To N_SLOTS - 1
+        d(i) = Array("", "")
+    Next i
+
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_HISTORY)
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    If lastRow < ROW_HIST_START Then Set LoadPrevDayFromHistory = d: Exit Function
+
+    ' 前当番日 = beforeDate より小さい最大の日付
+    Dim maxDate As Date: maxDate = 0
+    Dim r As Long, v As Variant, cellDate As Date
+    For r = ROW_HIST_START To lastRow
+        v = ws.Cells(r, 1).Value
+        If IsDate(v) Then
+            cellDate = CDate(v)
+            If cellDate < beforeDate And cellDate > maxDate Then
+                maxDate = cellDate
+            End If
+        End If
+    Next r
+    If maxDate = 0 Then
+        Set LoadPrevDayFromHistory = d
+        Exit Function
+    End If
+
+    ' maxDate の 25 行を読み込む
+    Dim slotMap As Object: Set slotMap = BuildSlotLabelMap()
+    For r = ROW_HIST_START To lastRow
+        v = ws.Cells(r, 1).Value
+        If IsDate(v) Then
+            If CDate(v) = maxDate Then
+                Dim slotLabel As String
+                slotLabel = Trim(CStr(Nz(ws.Cells(r, 2).Value, "")))
+                If slotMap.Exists(slotLabel) Then
+                    Dim idx As Long: idx = CLng(slotMap(slotLabel))
+                    d(idx) = Array( _
+                        Trim(CStr(Nz(ws.Cells(r, 3).Value, ""))), _
+                        Trim(CStr(Nz(ws.Cells(r, 4).Value, ""))) _
+                    )
+                End If
+            End If
+        End If
+    Next r
+    Set LoadPrevDayFromHistory = d
+End Function
+
+Private Function BuildSlotLabelMap() As Object
+    ' 時間帯ラベル -> index の辞書
+    Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
+    d.CompareMode = vbTextCompare
+    Dim slots() As String: slots = ReadTimeSlots()
     Dim i As Long
     For i = 0 To N_SLOTS - 1
-        d(i) = Array( _
-            Trim(CStr(Nz(ws.Cells(ROW_PREV_START + i, 2).Value, ""))), _
-            Trim(CStr(Nz(ws.Cells(ROW_PREV_START + i, 3).Value, ""))) _
-        )
+        d(slots(i)) = i
     Next i
-    Set LoadPrevDay = d
+    Set BuildSlotLabelMap = d
 End Function
 
 Private Function LoadSettings() As Object
@@ -471,15 +533,119 @@ End Sub
 ' =============================================================
 ' 出力
 ' =============================================================
-Private Sub WriteOutput(assign() As String, slots() As String)
+Private Sub WriteOutput(assign() As String, slots() As String, _
+    displayDate As Date)
     Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_OUT)
     Dim i As Long
     For i = 0 To N_SLOTS - 1
         ws.Cells(ROW_SLOT_START + i, 2).Value = assign(0, i)
         ws.Cells(ROW_SLOT_START + i, 5).Value = assign(1, i)
     Next i
+    ws.Range("B2").Value = displayDate
+    ws.Range("B2").NumberFormat = "yyyy/m/d"
     ws.Activate
     ws.Cells(ROW_SLOT_START, 2).Select
+End Sub
+
+' =============================================================
+' 履歴への追記 (既存同日分は上書き)
+' =============================================================
+Private Sub AppendToHistory(assign() As String, slots() As String, _
+    todayDate As Date)
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_HISTORY)
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    If lastRow < ROW_HIST_START - 1 Then lastRow = ROW_HIST_START - 1
+
+    ' 既存の同日行を削除 (下から)
+    Dim r As Long, v As Variant
+    For r = lastRow To ROW_HIST_START Step -1
+        v = ws.Cells(r, 1).Value
+        If IsDate(v) Then
+            If CDate(v) = todayDate Then ws.Rows(r).Delete
+        End If
+    Next r
+
+    ' 再計算後の最終行を取得
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    If lastRow < ROW_HIST_START - 1 Then lastRow = ROW_HIST_START - 1
+
+    ' 追記
+    Dim i As Long, writeRow As Long
+    For i = 0 To N_SLOTS - 1
+        writeRow = lastRow + 1 + i
+        With ws.Cells(writeRow, 1)
+            .Value = todayDate
+            .NumberFormat = "yyyy/m/d"
+        End With
+        ws.Cells(writeRow, 2).Value = slots(i)
+        ws.Cells(writeRow, 3).Value = assign(0, i)
+        ws.Cells(writeRow, 4).Value = assign(1, i)
+    Next i
+End Sub
+
+' =============================================================
+' 履歴から過去日を執務表に表示
+'   執務表!B2 にある日付を読み、その日のデータをレンダリング
+' =============================================================
+Public Sub ShowDateFromHistory()
+    On Error GoTo EH
+    Application.ScreenUpdating = False
+
+    Dim wsOut As Worksheet: Set wsOut = ThisWorkbook.Worksheets(SHEET_OUT)
+    Dim dv As Variant: dv = wsOut.Range("B2").Value
+    If Not IsDate(dv) Then
+        MsgBox "執務表シートの B2 に yyyy/m/d 形式の日付を入力してください。", vbExclamation
+        GoTo DONE_EXIT
+    End If
+    Dim targetDate As Date: targetDate = CDate(dv)
+
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_HISTORY)
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    If lastRow < ROW_HIST_START Then
+        MsgBox "履歴が空です。", vbExclamation
+        GoTo DONE_EXIT
+    End If
+
+    ' 出力欄をクリア
+    Dim i As Long
+    For i = 0 To N_SLOTS - 1
+        wsOut.Cells(ROW_SLOT_START + i, 2).Value = ""
+        wsOut.Cells(ROW_SLOT_START + i, 5).Value = ""
+    Next i
+
+    Dim slotMap As Object: Set slotMap = BuildSlotLabelMap()
+    Dim found As Boolean: found = False
+    Dim r As Long, v As Variant
+    For r = ROW_HIST_START To lastRow
+        v = ws.Cells(r, 1).Value
+        If IsDate(v) Then
+            If CDate(v) = targetDate Then
+                found = True
+                Dim slotLabel As String: slotLabel = Trim(CStr(Nz(ws.Cells(r, 2).Value, "")))
+                If slotMap.Exists(slotLabel) Then
+                    Dim idx As Long: idx = CLng(slotMap(slotLabel))
+                    wsOut.Cells(ROW_SLOT_START + idx, 2).Value = _
+                        Trim(CStr(Nz(ws.Cells(r, 3).Value, "")))
+                    wsOut.Cells(ROW_SLOT_START + idx, 5).Value = _
+                        Trim(CStr(Nz(ws.Cells(r, 4).Value, "")))
+                End If
+            End If
+        End If
+    Next r
+
+    wsOut.Activate
+    If Not found Then
+        MsgBox "指定日付のデータが履歴に見つかりません: " & Format(targetDate, "yyyy/m/d"), vbExclamation
+    End If
+
+DONE_EXIT:
+    Application.ScreenUpdating = True
+    Exit Sub
+EH:
+    Application.ScreenUpdating = True
+    MsgBox "エラー: " & Err.Description, vbCritical
 End Sub
 
 ' =============================================================
