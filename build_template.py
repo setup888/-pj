@@ -457,6 +457,55 @@ def build_output(ws):
     ws["A" + str(last + 6)] = "↑ 一次指定者は VBA マクロ「GenerateShift」で自動生成。指定変更欄は手書き用（出場時の代打記録）。"
 
 
+def build_vba_code(ws):
+    """VBAコードシート: ShiftScheduler.bas をセルに貼り付け、コピペ導入用"""
+    ws.title = "VBAコード"
+
+    ws["A1"] = "■ VBA マクロ導入手順"
+    ws["A1"].font = Font(bold=True, size=14)
+
+    instructions = [
+        "① このファイルを「名前を付けて保存」→ Excel マクロ有効ブック(.xlsm) で保存",
+        "② Alt + F11 で VBエディタを開く",
+        "③ 左ペインで ThisWorkbook を右クリック → 挿入 → 標準モジュール",
+        "④ A5 セルから下のコードを全て選択してコピー",
+        "   (Ctrl+Shift+End で最下行まで選択 → Ctrl+C)",
+        "⑤ 追加した標準モジュールに貼り付け (Ctrl+V)",
+        "⑥ 執務表シートに戻り、開発タブ→挿入→ボタンを配置、",
+        "   マクロ「GenerateShift」「ShowDateFromHistory」を割り当て",
+    ]
+    for i, line in enumerate(instructions, start=2):
+        ws.cell(row=i, column=1, value=line)
+
+    ws["A" + str(len(instructions) + 3)] = "■ ここから下をコピーして標準モジュールに貼り付け ↓"
+    ws["A" + str(len(instructions) + 3)].font = Font(bold=True, color="FF0000")
+
+    start_row = len(instructions) + 4
+
+    # ShiftScheduler.bas を読み込んで1行ずつセルに入れる
+    try:
+        with open("ShiftScheduler.bas", "r", encoding="utf-8") as f:
+            code = f.read()
+    except FileNotFoundError:
+        ws.cell(row=start_row, column=1,
+                value="(ShiftScheduler.bas が見つかりません。build_template.py と同じフォルダに置いてください)")
+        return
+
+    # 先頭の Attribute 行 (ファイルインポート用) は手動貼り付けでは不要なので除去
+    lines = code.split("\n")
+    if lines and lines[0].startswith("Attribute VB_Name"):
+        lines = lines[1:]
+
+    for i, line in enumerate(lines):
+        cell = ws.cell(row=start_row + i, column=1, value=line)
+        cell.font = Font(name="Consolas", size=10)
+        cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=False)
+
+    ws.column_dimensions["A"].width = 110
+    # コード開始行を目立たせる
+    ws.cell(row=start_row - 1, column=1).fill = PatternFill("solid", fgColor="FFF2CC")
+
+
 def build_help(ws):
     ws.title = "使い方"
     lines = [
@@ -467,8 +516,10 @@ def build_help(ws):
         "    - 役職: 指揮者/情報員/伝令/通信担当/機関員/一般/警防力/救助隊",
         "    - 警防力だけは日中×・深夜×・18-22優先 の特別ルール対象",
         " 2. このファイルを「名前を付けて保存」→ マクロ有効ブック(.xlsm)",
-        " 3. Alt+F11 で VBE を開き、ShiftScheduler.bas をインポート",
-        " 4. 執務表シートにボタン2つを配置",
+        " 3. Alt+F11 で VBエディタ。ThisWorkbook 右クリック→挿入→標準モジュール",
+        " 4. VBAコードシートの A12 以下を全コピー (Ctrl+Shift+End → Ctrl+C)",
+        "    新規モジュールに貼付 (Ctrl+V)",
+        " 5. 執務表シートにボタン2つを配置",
         "    - ボタン1: マクロ「GenerateShift」",
         "    - ボタン2: マクロ「ShowDateFromHistory」",
         "",
@@ -530,8 +581,12 @@ def main():
     ws_help = wb.create_sheet()
     build_help(ws_help)
 
-    # シート順: 執務表 / 当日チェック / 除外要件 / 名簿 / 履歴 / 設定 / 使い方
-    wb._sheets = [ws_output, ws_input, ws_excl, ws_roster, ws_history, ws_settings, ws_help]
+    ws_vba = wb.create_sheet()
+    build_vba_code(ws_vba)
+
+    # シート順: 執務表 / 当日チェック / 除外要件 / 名簿 / 履歴 / 設定 / 使い方 / VBAコード
+    wb._sheets = [ws_output, ws_input, ws_excl, ws_roster, ws_history,
+                  ws_settings, ws_help, ws_vba]
 
     wb.save(OUT_PATH)
     print(f"生成: {OUT_PATH}")
