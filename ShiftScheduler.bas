@@ -7,10 +7,15 @@ Attribute VB_Name = "ShiftScheduler"
 Option Explicit
 
 Private Const SHEET_OUT As String = "執務表"
-Private Const SHEET_INPUT As String = "当日入力"
+Private Const SHEET_INPUT As String = "当日チェック"
+Private Const SHEET_EXCL As String = "除外要件"
 Private Const SHEET_ROSTER As String = "名簿"
 Private Const SHEET_HISTORY As String = "履歴"
 Private Const SHEET_SET As String = "設定"
+
+Private Const ROW_CHECK_START As Long = 7     ' 当日チェック マトリクス開始行
+Private Const ROW_CHECK_END As Long = 36      ' 〃 終了行 (30名分)
+Private Const ROW_EXCL_START As Long = 5      ' 除外要件 データ開始行
 
 Private Const ROW_SLOT_START As Long = 5      ' 執務表/設定 の時間枠開始行
 Private Const ROW_HIST_START As Long = 5      ' 履歴 のデータ開始行
@@ -44,17 +49,20 @@ Public Sub GenerateShift()
     Dim daily As Object:     Set daily = LoadDailyInput()
     Dim todayDate As Date
     If Not IsDate(daily("当番日")) Then
-        MsgBox "当日入力シートの B3 に当番日 (yyyy/m/d) を入力してください。", vbExclamation
+        MsgBox "当日チェックシートの B3 に当番日 (yyyy/m/d) を入力してください。", vbExclamation
         GoTo DONE_EXIT
     End If
     todayDate = CDate(daily("当番日"))
+
+    ' 除外要件 (方面訓練・研修・出向・イベント等) をロードして daily に入れる
+    Set daily("除外") = LoadExclusions(todayDate)
 
     Dim prevDay As Object:   Set prevDay = LoadPrevDayFromHistory(todayDate)
     Dim settings As Object:  Set settings = LoadSettings()        ' (slot|role) -> mark
 
     Dim slots() As String:   slots = ReadTimeSlots()
 
-    ' 当日勤務可能な隊員リスト (休暇・研修を除外)
+    ' 当日勤務可能な隊員リスト (休暇を除外。半日不在は時間枠単位で IsBlocked)
     Dim members As Variant: members = AvailableMembers(roster, daily)
     If IsEmptyArray(members) Then
         MsgBox "割当可能な隊員が0名です。名簿と当日入力を確認してください。", vbExclamation
@@ -125,36 +133,82 @@ Private Function LoadRoster() As Object
 End Function
 
 Private Function LoadDailyInput() As Object
+    ' 当日チェックシートのマトリクスを読む
+    ' B3: 当番日, B4: 休日フラグ
+    ' 6行目ヘッダ、7〜36行目データ (氏名/休暇/食当/当直主任/当直副主任/備考)
     Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
     d.CompareMode = vbTextCompare
     Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_INPUT)
-    d("当番日") = ws.Range("B3").Value
-    d("曜日") = ws.Range("B4").Value
-    d("部") = ws.Range("B5").Value
-    d("当直主任") = ws.Range("B6").Value
-    d("当直副主任") = ws.Range("B7").Value
-    d("休日") = CLng(Nz(ws.Range("B8").Value, 0))
 
-    ' カテゴリリスト (列: 食当=D, 休暇=F, 研修=H, 救助訓練=J, 警防力=L)
-    Set d("食当") = ReadNameList(ws, 4)
-    Set d("休暇") = ReadNameList(ws, 6)
-    Set d("研修") = ReadNameList(ws, 8)
-    Set d("救助訓練") = ReadNameList(ws, 10)
-    Set d("警防力") = ReadNameList(ws, 12)
+    d("当番日") = ws.Range("B3").Value
+    d("休日") = CLng(Nz(ws.Range("B4").Value, 0))
+
+    Dim 休暇 As Object: Set 休暇 = CreateObject("Scripting.Dictionary"): 休暇.CompareMode = vbTextCompare
+    Dim 食当 As Object: Set 食当 = CreateObject("Scripting.Dictionary"): 食当.CompareMode = vbTextCompare
+    Dim 当直主任 As String, 当直副主任 As String
+    当直主任 = "": 当直副主任 = ""
+
+    Dim r As Long, name As String
+    For r = ROW_CHECK_START To ROW_CHECK_END
+        name = Trim(CStr(Nz(ws.Cells(r, 2).Value, "")))
+        If Len(name) > 0 Then
+            If IsChecked(ws.Cells(r, 3).Value) Then 休暇(name) = True   ' C列: 休暇
+            If IsChecked(ws.Cells(r, 4).Value) Then 食当(name) = True   ' D列: 食当
+            If IsChecked(ws.Cells(r, 5).Value) And Len(当直主任) = 0 Then 当直主任 = name  ' E列
+            If IsChecked(ws.Cells(r, 6).Value) And Len(当直副主任) = 0 Then 当直副主任 = name  ' F列
+        End If
+    Next r
+
+    Set d("休暇") = 休暇
+    Set d("食当") = 食当
+    d("当直主任") = 当直主任
+    d("当直副主任") = 当直副主任
 
     Set LoadDailyInput = d
 End Function
 
-Private Function ReadNameList(ws As Worksheet, colIdx As Long) As Object
-    ' 当日入力シートのリスト入力欄 (行 12〜19 の固定レイアウト)
-    Dim s As Object: Set s = CreateObject("Scripting.Dictionary")
-    s.CompareMode = vbTextCompare
-    Dim r As Long, name As String
-    For r = 12 To 19
-        name = Trim(CStr(Nz(ws.Cells(r, colIdx).Value, "")))
-        If Len(name) > 0 Then s(name) = True
+Private Function IsChecked(v As Variant) As Boolean
+    ' 任意の非空文字 (○・✓・X 等) を True とみなす
+    If IsNull(v) Or IsEmpty(v) Then IsChecked = False: Exit Function
+    IsChecked = (Len(Trim(CStr(v))) > 0)
+End Function
+
+Private Function LoadExclusions(targetDate As Date) As Object
+    ' 除外要件シート: name -> Collection of Array(startIdx, endIdx)
+    Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
+    d.CompareMode = vbTextCompare
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(SHEET_EXCL)
+    On Error GoTo 0
+    If ws Is Nothing Then Set LoadExclusions = d: Exit Function
+
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    If lastRow < ROW_EXCL_START Then Set LoadExclusions = d: Exit Function
+
+    Dim slotMap As Object: Set slotMap = BuildSlotLabelMap()
+    Dim r As Long, v As Variant
+    For r = ROW_EXCL_START To lastRow
+        v = ws.Cells(r, 1).Value
+        If IsDate(v) Then
+            If CDate(v) = targetDate Then
+                Dim name As String
+                name = Trim(CStr(Nz(ws.Cells(r, 2).Value, "")))
+                Dim sLbl As String, eLbl As String
+                sLbl = Trim(CStr(Nz(ws.Cells(r, 3).Value, "")))
+                eLbl = Trim(CStr(Nz(ws.Cells(r, 4).Value, "")))
+                If Len(name) > 0 And slotMap.Exists(sLbl) And slotMap.Exists(eLbl) Then
+                    If Not d.Exists(name) Then
+                        Dim c As Collection: Set c = New Collection
+                        Set d(name) = c
+                    End If
+                    d(name).Add Array(CLng(slotMap(sLbl)), CLng(slotMap(eLbl)))
+                End If
+            End If
+        End If
     Next r
-    Set ReadNameList = s
+    Set LoadExclusions = d
 End Function
 
 Private Function LoadPrevDayFromHistory(beforeDate As Date) As Object
@@ -266,8 +320,8 @@ Private Function AvailableMembers(roster As Object, daily As Object) As Variant
     Dim col As Collection: Set col = New Collection
     Dim k As Variant
     For Each k In roster.Keys
-        If Not daily("休暇").Exists(CStr(k)) _
-           And Not daily("研修").Exists(CStr(k)) Then
+        ' 休暇のみ全員除外。半日不在(除外要件)は時間帯単位で後段が処理
+        If Not daily("休暇").Exists(CStr(k)) Then
             col.Add CStr(k)
         End If
     Next k
@@ -344,7 +398,7 @@ Private Function IsBlocked(name As String, slotIdx As Long, _
     slots() As String) As Boolean
     Dim role As String: role = CStr(roster(name))
 
-    ' 1) 設定シートの × / △ ( × は絶対禁止 )
+    ' 1) 設定シートの × (役職×時間枠の固定ルール)
     Dim key As String: key = slotIdx & "|" & role
     If settings.Exists(key) Then
         If InStr(settings(key), "×") > 0 Then
@@ -353,7 +407,13 @@ Private Function IsBlocked(name As String, slotIdx As Long, _
         End If
     End If
 
-    ' 2) 動的ブロック: 食当 → 14-17時
+    ' 2) 休暇 → 全時間 ×
+    If daily("休暇").Exists(name) Then
+        IsBlocked = True
+        Exit Function
+    End If
+
+    ' 3) 食当 → 14-17時 ×
     If daily("食当").Exists(name) Then
         If slotIdx >= S_14_15 And slotIdx <= S_14_15 + 2 Then  ' 14,15,16
             IsBlocked = True
@@ -361,36 +421,41 @@ Private Function IsBlocked(name As String, slotIdx As Long, _
         End If
     End If
 
-    ' 3) 動的ブロック: 救助訓練期間 → 10-17時×
-    If daily("救助訓練").Exists(name) Then
-        If slotIdx >= S_10_11 And slotIdx <= S_17_18 - 1 Then  ' 10..16
-            IsBlocked = True
-            Exit Function
-        End If
-    End If
-
-    ' 4) 動的ブロック: 警防力 → 日中×（休日=1なら緩和）、深夜×
-    If daily("警防力").Exists(name) Or role = "警防力" Then
+    ' 4) 警防力 (役職) → 日中× (休日=1なら緩和)、深夜×
+    If role = "警防力" Then
         If daily("休日") <> 1 Then
             If slotIdx >= S_8_9 And slotIdx <= S_17_18 Then
                 IsBlocked = True
                 Exit Function
             End If
         End If
-        ' 深夜(0-6時)は基本×
         If slotIdx >= S_0_1 And slotIdx <= S_6_7 - 1 Then
             IsBlocked = True
             Exit Function
         End If
     End If
 
-    ' 5) 当直主任/副主任 は 18-19時, 6-8時 × (当直×相当)
+    ' 5) 当直主任/副主任 は 18-19時, 6-8時 ×
     If name = CStr(Nz(daily("当直主任"), "")) Or _
        name = CStr(Nz(daily("当直副主任"), "")) Then
         If slotIdx = S_18_19 Or slotIdx = S_18_19 + 1 Or _
            slotIdx = S_6_7 Or slotIdx = S_6_7 + 1 Then
             IsBlocked = True
             Exit Function
+        End If
+    End If
+
+    ' 6) 除外要件 (方面訓練・研修・出向・救助訓練等の半日不在)
+    If daily.Exists("除外") Then
+        If daily("除外").Exists(name) Then
+            Dim coll As Collection: Set coll = daily("除外")(name)
+            Dim item As Variant
+            For Each item In coll
+                If slotIdx >= CLng(item(0)) And slotIdx <= CLng(item(1)) Then
+                    IsBlocked = True
+                    Exit Function
+                End If
+            Next item
         End If
     End If
 
@@ -424,16 +489,9 @@ Private Function ScoreCandidate(name As String, col As Long, slotIdx As Long, _
         If prevNext = name Then score = score - 5
     End If
 
-    ' (d) 警防力は 18-22時を優先 (それ以外で使われるとペナルティ少し軽減)
-    If daily("警防力").Exists(name) Or CStr(roster(name)) = "警防力" Then
+    ' (d) 警防力は 18-22時を優先
+    If CStr(roster(name)) = "警防力" Then
         If slotIdx >= S_18_19 And slotIdx <= S_20_21 + 1 Then
-            score = score - 20
-        End If
-    End If
-
-    ' (e) 救助訓練期間者は 17-19時を優先
-    If daily("救助訓練").Exists(name) Then
-        If slotIdx = S_17_18 Or slotIdx = S_18_19 Then
             score = score - 20
         End If
     End If
@@ -681,9 +739,7 @@ Private Function Validate(assign() As String, roster As Object, _
     For Each k In roster.Keys
         If covered(CStr(k)) = 0 _
             And Not daily("休暇").Exists(CStr(k)) _
-            And Not daily("研修").Exists(CStr(k)) _
-            And CStr(roster(k)) <> "警防力" _
-            And Not daily("警防力").Exists(CStr(k)) Then
+            And CStr(roster(k)) <> "警防力" Then
             msgs = msgs & " - " & CStr(k) & " は 10-17時に未勤務" & vbCrLf
         End If
     Next k

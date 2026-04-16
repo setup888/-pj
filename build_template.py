@@ -135,59 +135,132 @@ def build_roster(ws):
 
 
 def build_daily_input(ws):
-    """当日入力シート: 日付、食当、休暇、研修、訓練期間など。"""
-    ws.title = "当日入力"
+    """当日チェック: 氏名は名簿から自動反映、○を打つだけで休暇/食当/当直を指定"""
+    ws.title = "当日チェック"
 
-    ws["A1"] = "当日入力"
+    ws["A1"] = "当日チェック"
     ws["A1"].font = Font(bold=True, size=14)
 
-    rows = [
-        ("当番日 (yyyy/m/d)", "2026/4/16"),
-        ("曜日", "木"),
-        ("部", "3部"),
-        ("当直主任", "氏名"),
-        ("当直副主任", "氏名"),
-        ("休日フラグ (1=休日/0=平日)", 0),
-    ]
-    r = 3
-    for label, val in rows:
-        ws.cell(row=r, column=1, value=label).font = FONT_BOLD
-        ws.cell(row=r, column=1).border = BORDER_ALL
-        c = ws.cell(row=r, column=2, value=val)
-        style_input(c)
-        if label.startswith("当番日"):
-            c.number_format = "yyyy/m/d"
-        r += 1
+    # 上部: 当番日 / 休日フラグ
+    from datetime import date
+    ws["A3"] = "当番日 (yyyy/m/d)"
+    ws["A3"].font = FONT_BOLD
+    ws["A3"].border = BORDER_ALL
+    ws["B3"] = date(2026, 4, 16)
+    ws["B3"].number_format = "yyyy/m/d"
+    style_input(ws["B3"])
 
-    # リスト入力（食当、休暇、研修、救助訓練期間）
-    ws.cell(row=r + 1, column=1, value="下記は氏名を縦に記入。名簿と完全一致させること。").font = Font(italic=True)
+    ws["A4"] = "休日フラグ (1=休日/0=平日)"
+    ws["A4"].font = FONT_BOLD
+    ws["A4"].border = BORDER_ALL
+    ws["B4"] = 0
+    style_input(ws["B4"])
 
-    categories = [
-        ("食当担当者 (14-17時×)", "D"),
-        ("休暇者", "F"),
-        ("研修・出向者", "H"),
-        ("救助隊訓練期間フラグ者 (10-17時×, 17-19時優先)", "J"),
-        ("警防力(毎日勤務)", "L"),
-    ]
-    for label, col in categories:
-        header_cell = ws.cell(row=r + 2, column=openpyxl_col(col), value=label)
-        style_header(header_cell)
-        ws.merge_cells(start_row=r + 2, start_column=openpyxl_col(col),
-                       end_row=r + 2, end_column=openpyxl_col(col) + 1)
-        for i in range(8):
-            cell = ws.cell(row=r + 3 + i, column=openpyxl_col(col))
-            style_input(cell)
-            ws.cell(row=r + 3 + i, column=openpyxl_col(col) + 1).border = BORDER_ALL
+    # マトリクス: 氏名×状態
+    headers = ["No", "氏名", "休暇", "食当", "当直主任", "当直副主任", "備考"]
+    for i, h in enumerate(headers, start=1):
+        c = ws.cell(row=6, column=i, value=h)
+        style_header(c)
 
-    ws.column_dimensions["A"].width = 30
-    ws.column_dimensions["B"].width = 22
-    for col in "DEFGHIJKLM":
-        ws.column_dimensions[col].width = 14
+    # 氏名列は名簿から formula で反映
+    N_ROSTER = 30
+    for i in range(N_ROSTER):
+        rr = 7 + i
+        roster_row = 2 + i
+        ws.cell(row=rr, column=1, value=i + 1).alignment = ALIGN_CENTER
+        ws.cell(row=rr, column=1).border = BORDER_ALL
+        name_cell = ws.cell(row=rr, column=2,
+                            value=f'=IF(名簿!B{roster_row}="","",名簿!B{roster_row})')
+        name_cell.border = BORDER_ALL
+        name_cell.alignment = ALIGN_LEFT
+        # チェック用セル
+        for c in range(3, 7):
+            cell = ws.cell(row=rr, column=c)
+            cell.border = BORDER_ALL
+            cell.alignment = ALIGN_CENTER
+            cell.fill = FILL_INPUT
+        ws.cell(row=rr, column=7).border = BORDER_ALL  # 備考
+
+    # ドロップダウン: ○ だけ選べる (直接タイプでもOK)
+    dv = DataValidation(type="list", formula1='"○"', allow_blank=True)
+    ws.add_data_validation(dv)
+    dv.add(f"C7:F{6 + N_ROSTER}")
+
+    ws.column_dimensions["A"].width = 5
+    ws.column_dimensions["B"].width = 18
+    for c in "CDEF":
+        ws.column_dimensions[c].width = 10
+    ws.column_dimensions["G"].width = 30
+
+    # 使い方注記
+    ws["A" + str(7 + N_ROSTER + 1)] = (
+        "※ 氏名は名簿シートから自動反映。該当セルに ○ を打つだけ。"
+        "半日単位の除外 (方面訓練・研修・出向等) は「除外要件」シートに記入。"
+    )
+    ws.merge_cells(start_row=7 + N_ROSTER + 1, start_column=1,
+                   end_row=7 + N_ROSTER + 1, end_column=7)
 
 
 def openpyxl_col(letter):
     from openpyxl.utils import column_index_from_string
     return column_index_from_string(letter)
+
+
+def build_exclusions(ws):
+    """除外要件シート: 半日単位の不在を汎用的に管理 (方面訓練・研修・出向・イベント等)"""
+    ws.title = "除外要件"
+    ws["A1"] = "除外要件 (半日単位の不在を管理)"
+    ws["A1"].font = Font(bold=True, size=12)
+    ws["A2"] = ("月初または予定判明時に記入。"
+                "当日チェックで扱わない半日等の除外はすべてここに。"
+                "氏名は名簿のドロップダウンから選択。")
+    ws["A2"].font = Font(italic=True, size=10)
+
+    headers = ["当番日", "氏名", "開始時間帯", "終了時間帯", "理由"]
+    for i, h in enumerate(headers, start=1):
+        c = ws.cell(row=4, column=i, value=h)
+        style_header(c)
+
+    N_ROWS = 100
+    for i in range(N_ROWS):
+        rr = 5 + i
+        for cc in range(1, 6):
+            cell = ws.cell(row=rr, column=cc)
+            cell.border = BORDER_ALL
+            if cc in (1, 2, 3, 4, 5):
+                cell.fill = FILL_INPUT
+        ws.cell(row=rr, column=1).number_format = "yyyy/m/d"
+
+    # 氏名ドロップダウン (名簿から)
+    dv_name = DataValidation(type="list", formula1="=名簿!$B$2:$B$31", allow_blank=True)
+    ws.add_data_validation(dv_name)
+    dv_name.add(f"B5:B{4 + N_ROWS}")
+
+    # 時間帯ドロップダウン (TIME_SLOTS のリスト)
+    slot_list = ",".join(TIME_SLOTS)
+    dv_slot = DataValidation(type="list", formula1=f'"{slot_list}"', allow_blank=True)
+    ws.add_data_validation(dv_slot)
+    dv_slot.add(f"C5:D{4 + N_ROWS}")
+
+    ws.column_dimensions["A"].width = 14
+    ws.column_dimensions["B"].width = 18
+    ws.column_dimensions["C"].width = 12
+    ws.column_dimensions["D"].width = 12
+    ws.column_dimensions["E"].width = 24
+
+    ws.freeze_panes = "A5"
+
+    # サンプル行 (消してOK)
+    from datetime import date
+    samples = [
+        (date(2026, 4, 16), "", "9〜10", "12〜13", "方面訓練"),
+        (date(2026, 4, 16), "", "8:40〜9", "8〜8:40", "出向 (終日)"),
+        (date(2026, 4, 19), "", "10〜11", "16〜17", "救助訓練"),
+    ]
+    for i, row in enumerate(samples):
+        for j, val in enumerate(row, start=1):
+            ws.cell(row=5 + i, column=j, value=val)
+        ws.cell(row=5 + i, column=1).number_format = "yyyy/m/d"
 
 
 def build_history(ws):
@@ -389,46 +462,44 @@ def build_help(ws):
     lines = [
         "【執務表自動化 使い方】",
         "",
-        "◆ 月初の準備 (月1回だけ)",
-        " 1. 履歴シートに前月分の一次指定者をコピペ (当番日×25行ずつ縦に並ぶ)",
-        "    - 前月末の当番日が残っていれば、最初の当番でも自動でローテできる",
-        "",
-        "◆ 毎当番の作業 (ボタン1回)",
-        " 1. 当日入力シート",
-        "    - 当番日を yyyy/m/d 形式で更新",
-        "    - 食当・休暇・研修・救助訓練・警防力の氏名を更新",
-        "    - 当直主任/副主任を更新",
-        " 2. 執務表シートのボタン「本日を生成」を押す",
-        "    → 履歴の最新日を「前日」として読み込み、自動で一次指定者が埋まる",
-        "    → 生成結果は履歴に自動追記される",
-        " 3. 指定変更欄は空欄のまま。出場時の代打を手書き",
-        " 4. 印刷 or Word様式にコピペ",
-        "",
-        "◆ 過去の日を見たい場合",
-        " - 執務表シートの「表示日付 (B2)」に yyyy/m/d を書いて",
-        "   ボタン「表示日付を反映」を押す (マクロ ShowDateFromHistory)",
-        "",
-        "◆ 名簿の更新",
-        " 1. 名簿シートに3部員の氏名と役職カテゴリを入力 (最大30名)",
-        "   - 役職カテゴリは C列のドロップダウンから選択",
-        "   - 指揮者/情報員/伝令/通信担当/機関員/一般/警防力/救助隊 の8区分",
-        "",
-        "◆ 制約を変えたい場合",
-        " - 禁止時間帯 → 設定シートのマスを × / △ / 空白 で編集",
-        " - 食当・救助訓練期間・警防力 → 当日入力シートで変える",
-        "",
-        "■ 初回セットアップ (VBAマクロ導入)",
-        " a) このファイルを「名前を付けて保存」→ Excel マクロ有効ブック(.xlsm)",
-        " b) Alt+F11 で VBE を開く",
-        " c) [ファイル]→[ファイルのインポート] で ShiftScheduler.bas を選ぶ",
-        " d) 執務表シートに [開発]タブ→[挿入]→[ボタン] で図形を2つ置き",
+        "◆ 初回のみ",
+        " 1. 名簿シートに隊員の氏名と役職カテゴリを入力 (最大30名)",
+        "    - 役職: 指揮者/情報員/伝令/通信担当/機関員/一般/警防力/救助隊",
+        "    - 警防力だけは日中×・深夜×・18-22優先 の特別ルール対象",
+        " 2. このファイルを「名前を付けて保存」→ マクロ有効ブック(.xlsm)",
+        " 3. Alt+F11 で VBE を開き、ShiftScheduler.bas をインポート",
+        " 4. 執務表シートにボタン2つを配置",
         "    - ボタン1: マクロ「GenerateShift」",
         "    - ボタン2: マクロ「ShowDateFromHistory」",
         "",
-        "◆ 履歴シートの扱い",
-        " - 自動追記なので基本触らない",
-        " - 月初に前月分を貼り付ける (列: 当番日/時間帯/通信指令/受付、1当番=25行)",
-        " - 間違えて追記された日があれば、該当25行を削除すればOK",
+        "◆ 月初の準備 (月1回)",
+        " 1. 履歴シートに前月分をコピペ (列: 当番日/時間帯/通信/受付、1当番=25行)",
+        " 2. 除外要件シートに当月の予定を記入 (方面訓練・研修・出向など)",
+        "    - 判ってる範囲でOK。後から追加可",
+        "",
+        "◆ 毎当番の作業 (ほぼチェックだけ)",
+        " 1. 当日チェックシート",
+        "    - B3 の当番日を今日の日付に更新",
+        "    - 休暇・食当・当直主任・当直副主任 の該当セルに ○ を打つ",
+        "    - 休日なら B4 の休日フラグを 1 に",
+        " 2. 執務表シートの「本日を生成」ボタンを押す",
+        "    → 一次指定者が自動で埋まる",
+        "    → 履歴にも自動追記",
+        " 3. 指定変更欄は空欄のまま (出場時の代打は手書き)",
+        " 4. 印刷 or Word様式にコピペ",
+        "",
+        "◆ 過去の日を見たい",
+        " - 執務表シート B2 に日付を書いて「ShowDateFromHistory」ボタン",
+        "",
+        "◆ 除外要件シート",
+        " - 当番日/氏名/開始時間帯/終了時間帯/理由 を1行で追加",
+        " - 氏名・時間帯はドロップダウンから選択",
+        " - 終日なら 開始=8:40〜9, 終了=8〜8:40",
+        " - 救助訓練・研修・方面訓練・出向・イベント等 全てここで扱う",
+        "",
+        "◆ 制約を変えたい",
+        " - 役職固有のルール → 設定シートのマスを × で編集",
+        " - 特定日の半日不在 → 除外要件シートに行追加",
     ]
     for i, line in enumerate(lines, start=1):
         ws.cell(row=i, column=1, value=line)
@@ -444,6 +515,9 @@ def main():
     ws_input = wb.create_sheet()
     build_daily_input(ws_input)
 
+    ws_excl = wb.create_sheet()
+    build_exclusions(ws_excl)
+
     ws_roster = wb.create_sheet()
     build_roster(ws_roster)
 
@@ -456,8 +530,8 @@ def main():
     ws_help = wb.create_sheet()
     build_help(ws_help)
 
-    # シート順: 執務表 / 当日入力 / 名簿 / 履歴 / 設定 / 使い方
-    wb._sheets = [ws_output, ws_input, ws_roster, ws_history, ws_settings, ws_help]
+    # シート順: 執務表 / 当日チェック / 除外要件 / 名簿 / 履歴 / 設定 / 使い方
+    wb._sheets = [ws_output, ws_input, ws_excl, ws_roster, ws_history, ws_settings, ws_help]
 
     wb.save(OUT_PATH)
     print(f"生成: {OUT_PATH}")
