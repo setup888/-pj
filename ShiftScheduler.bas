@@ -77,15 +77,19 @@ Public Sub GenerateShift()
         workCount(CStr(members(i))) = 0
     Next i
 
-    ' メインループ: 各時間枠で 通信 → 受付 の順に割当
-    Dim slotIdx As Long, col As Long
-    For slotIdx = 0 To N_SLOTS - 1
+    ' メインループ: 10-17時(daytime) を先に、次に夜間、最後に朝8:40-10
+    ' これで 10-17時カバレッジを確実にする
+    Dim slotOrder() As Long
+    slotOrder = BuildSlotProcessOrder()
+    Dim k As Long, slotIdx As Long, col As Long
+    For k = 0 To UBound(slotOrder)
+        slotIdx = slotOrder(k)
         For col = 0 To 1  ' 0=通信, 1=受付
             assign(col, slotIdx) = PickAssignee( _
                 col, slotIdx, slots, members, roster, _
                 daily, prevDay, settings, assign, workCount)
         Next col
-    Next slotIdx
+    Next k
 
     ' 制約修正パス: 12勤 と 17勤 が同じ人なら入れ替え
     Call EnforceDistinct12_17(assign, members, roster, daily, settings, slots)
@@ -472,14 +476,16 @@ Private Function ScoreCandidate(name As String, col As Long, slotIdx As Long, _
     ' (a) 総勤務回数が少ない人を優先
     score = score + CDbl(workCount(name)) * 10
 
-    ' (b) 前日同時刻と同じ人なら 夜20時以降は強ペナルティ
+    ' (b) 前日同時刻と同じ人なら 夜20時以降〜朝までは強ペナルティ
     Dim prevName As String
     prevName = prevDay(slotIdx)(col)
     If Len(prevName) > 0 And prevName = name Then
-        If slotIdx >= S_20_21 Or slotIdx <= S_4_5 Then
-            score = score + 1000    ' ほぼ回避
+        If slotIdx >= S_20_21 Then
+            ' 20時以降〜翌8:40 (slot 12..24) は前日同一人物をほぼ避ける
+            score = score + 1000
         Else
-            score = score + 50      ' 日中は多少ペナルティ
+            ' 日中は軽いペナルティ (ゼロ時〜19時)
+            score = score + 50
         End If
     End If
 
@@ -496,10 +502,10 @@ Private Function ScoreCandidate(name As String, col As Long, slotIdx As Long, _
         End If
     End If
 
-    ' (f) 10-17時未勤務者を優先: その人が 10-17時まだ1回も入ってないなら強優先
+    ' (f) 10-17時未勤務者を強優先: 全員を1回は入れるためスコアを大きく下げる
     If slotIdx >= S_10_11 And slotIdx <= S_17_18 - 1 Then
         If DaytimeCount(name, assign, slotIdx) = 0 Then
-            score = score - 30
+            score = score - 200
         End If
     End If
 
@@ -524,6 +530,33 @@ Private Function ScoreCandidate(name As String, col As Long, slotIdx As Long, _
     End If
 
     ScoreCandidate = score
+End Function
+
+Private Function BuildSlotProcessOrder() As Long()
+    ' 処理順: 10-17時 (daytime) を最優先 → 夜間 → 深夜 → 朝 8:40-10
+    ' 理由: daytime の (f)未勤務ボーナスを有効にするため、
+    ' 朝8:40-10を先にアサインするとそこに入った人の workCount が上がり daytime で負ける
+    Dim arr(0 To N_SLOTS - 1) As Long
+    Dim n As Long: n = 0
+    Dim i As Long
+    ' 1) 10〜17 (slot 2..8)
+    For i = S_10_11 To S_17_18 - 1
+        arr(n) = i: n = n + 1
+    Next i
+    ' 2) 17〜24 (slot 9..15)
+    For i = 9 To 15
+        arr(n) = i: n = n + 1
+    Next i
+    ' 3) 0〜8 (slot 16..23)
+    For i = 16 To 23
+        arr(n) = i: n = n + 1
+    Next i
+    ' 4) 8〜8:40 (slot 24)
+    arr(n) = 24: n = n + 1
+    ' 5) 8:40〜9, 9〜10 (slot 0, 1) を最後
+    arr(n) = 0: n = n + 1
+    arr(n) = 1: n = n + 1
+    BuildSlotProcessOrder = arr
 End Function
 
 Private Function IsLateNight(slotIdx As Long) As Boolean
