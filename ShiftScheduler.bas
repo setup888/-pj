@@ -116,6 +116,97 @@ EH:
 End Sub
 
 ' =============================================================
+' 診断: 各隊員のポジション/除外/ブロック時間帯を一覧表示
+'   除外が反映されない等のトラブル時に使用
+' =============================================================
+Public Sub DebugShowBlocks()
+    On Error GoTo EH
+    Application.ScreenUpdating = False
+
+    Dim slots() As String: slots = ReadTimeSlots()
+    Dim roster As Object: Set roster = LoadRoster()
+    Dim positions As Object: Set positions = LoadPositions(slots)
+    Dim daily As Object: Set daily = LoadDailyInput(slots)
+
+    ' 診断シート作成 (既存あれば上書き)
+    Dim wsName As String: wsName = "_診断"
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(wsName)
+    On Error GoTo EH
+    If ws Is Nothing Then
+        Set ws = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+        ws.Name = wsName
+    Else
+        ws.Cells.Clear
+    End If
+
+    ws.Cells(1, 1).Value = "氏名"
+    ws.Cells(1, 2).Value = "階級"
+    ws.Cells(1, 3).Value = "ポジション (認識)"
+    ws.Cells(1, 4).Value = "除外 (認識)"
+    ws.Cells(1, 5).Value = "ブロック時間帯"
+    Dim hdr As Range: Set hdr = ws.Range("A1:E1")
+    hdr.Font.Bold = True
+    hdr.Interior.Color = RGB(220, 230, 241)
+
+    Dim r As Long: r = 2
+    Dim k As Variant
+    For Each k In roster.Keys
+        Dim name As String: name = CStr(k)
+        ws.Cells(r, 1).Value = name
+        ws.Cells(r, 2).Value = CStr(roster(name))
+
+        ' ポジション
+        Dim posStr As String: posStr = ""
+        If daily("ポジション").Exists(name) Then
+            Dim pos As Variant
+            For Each pos In daily("ポジション")(name)
+                If Len(posStr) > 0 Then posStr = posStr & " + "
+                posStr = posStr & CStr(pos)
+            Next pos
+        End If
+        ws.Cells(r, 3).Value = posStr
+
+        ' 除外
+        Dim exclStr As String: exclStr = ""
+        If daily("除外").Exists(name) Then
+            Dim coll As Collection: Set coll = daily("除外")(name)
+            Dim it As Variant
+            For Each it In coll
+                If Len(exclStr) > 0 Then exclStr = exclStr & " / "
+                exclStr = exclStr & slots(CLng(it(0))) & " 〜 " & slots(CLng(it(1)))
+            Next it
+        End If
+        ws.Cells(r, 4).Value = exclStr
+
+        ' ブロック時間帯
+        Dim blocked As String: blocked = ""
+        Dim i As Long
+        For i = 0 To N_SLOTS - 1
+            If IsBlocked(name, i, daily, positions) Then
+                If Len(blocked) > 0 Then blocked = blocked & ", "
+                blocked = blocked & slots(i)
+            End If
+        Next i
+        ws.Cells(r, 5).Value = blocked
+        r = r + 1
+    Next k
+
+    ws.Columns("A:E").AutoFit
+    ws.Activate
+
+    Application.ScreenUpdating = True
+    MsgBox "診断シート『_診断』を作成しました。" & vbCrLf & _
+           "除外列やポジション列に意図した内容が反映されているか確認してください。", _
+           vbInformation
+    Exit Sub
+EH:
+    Application.ScreenUpdating = True
+    MsgBox "エラー: " & Err.Description, vbCritical
+End Sub
+
+' =============================================================
 ' 履歴から過去日を表示
 ' =============================================================
 Public Sub ShowDateFromHistory()
