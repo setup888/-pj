@@ -21,6 +21,26 @@ TIME_SLOTS = [
 N = len(TIME_SLOTS)
 SLOT_MAP = {s: i for i, s in enumerate(TIME_SLOTS)}
 
+# 時刻境界 (26)
+TIME_MARKER_MAP = {
+    "8:40": 0, "9時": 1, "10時": 2, "11時": 3, "12時": 4, "13時": 5,
+    "14時": 6, "15時": 7, "16時": 8, "17時": 9, "18時": 10, "19時": 11,
+    "20時": 12, "21時": 13, "22時": 14, "23時": 15, "0時": 16, "1時": 17,
+    "2時": 18, "3時": 19, "4時": 20, "5時": 21, "6時": 22, "7時": 23,
+    "8時": 24, "8:40(翌)": 25,
+}
+
+
+def marker_range(from_label: str, to_label: str) -> Tuple[int, int]:
+    """時刻境界ラベルから スロット範囲 [start, end] を返す。
+    例: ("9時", "17時") → (1, 8) → slot 9〜10 から 16〜17 をブロック
+    """
+    s = TIME_MARKER_MAP[from_label]
+    e = TIME_MARKER_MAP[to_label]
+    if e < s:
+        s, e = e, s
+    return (s, e - 1)
+
 S_10_11 = 2
 S_12_13 = 4
 S_17_18 = 9
@@ -217,7 +237,7 @@ def main():
             "後藤 直人": ["署隊長伝令"],
         },
         exclusions={
-            "鍋谷 昇": [(SLOT_MAP["9〜10"], SLOT_MAP["12〜13"])],
+            "鍋谷 昇": [marker_range("9時", "13時")],  # 方面訓練 9時〜13時
         },
     )
     prev_day = {i: ("", "") for i in range(N)}

@@ -242,13 +242,14 @@ End Function
 
 Private Function LoadDailyInput(slots() As String) As Object
     ' 当日チェックシートを読む
-    ' 新レイアウト (1人 1行):
+    ' レイアウト (1人 1行):
     '   A: No, B: 氏名,
     '   C: 休暇 (○), D: 当直 (○), E: 食当 (○),
     '   F: ポジション1, G: ポジション2,
-    '   H: 除外1開始, I: 除外1終了,
-    '   J: 除外2開始, K: 除外2終了,
+    '   H: 除外1 から(時刻), I: 除外1 まで(時刻),
+    '   J: 除外2 から, K: 除外2 まで,
     '   L: 備考
+    ' 除外時間帯は時刻境界で指定 (例: 9時 から 17時 = slot 1〜8 ブロック)
     Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
     d.CompareMode = vbTextCompare
     Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_INPUT)
@@ -256,13 +257,12 @@ Private Function LoadDailyInput(slots() As String) As Object
     d("当番日") = ws.Range("B3").Value
     d("休日") = CLng(Nz(ws.Range("B4").Value, 0))
 
-    ' name -> Collection of position names (複数対応)
     Dim posByName As Object: Set posByName = CreateObject("Scripting.Dictionary")
     posByName.CompareMode = vbTextCompare
     Dim exclByName As Object: Set exclByName = CreateObject("Scripting.Dictionary")
     exclByName.CompareMode = vbTextCompare
 
-    Dim slotMap As Object: Set slotMap = BuildSlotLabelMap(slots)
+    Dim markerMap As Object: Set markerMap = BuildTimeMarkerMap()
 
     Dim r As Long
     For r = ROW_CHECK_START To ROW_CHECK_END
@@ -288,7 +288,7 @@ Private Function LoadDailyInput(slots() As String) As Object
             Set posByName(name) = posList
         End If
 
-        ' 除外1/2 (列 H..K = 8..11)
+        ' 除外1/2: 時刻境界→スロット範囲変換
         Dim k As Long, coll As Collection
         Set coll = Nothing
         For k = 0 To 1
@@ -298,17 +298,20 @@ Private Function LoadDailyInput(slots() As String) As Object
             Dim sLbl As String, eLbl As String
             sLbl = Trim(CStr(Nz(ws.Cells(r, sCol).Value, "")))
             eLbl = Trim(CStr(Nz(ws.Cells(r, eCol).Value, "")))
-            If slotMap.Exists(sLbl) And slotMap.Exists(eLbl) Then
-                If coll Is Nothing Then
-                    Set coll = New Collection
+            If markerMap.Exists(sLbl) And markerMap.Exists(eLbl) Then
+                Dim sBoundary As Long, eBoundary As Long
+                sBoundary = CLng(markerMap(sLbl))
+                eBoundary = CLng(markerMap(eLbl))
+                ' "から"<"まで" に揃える
+                If eBoundary < sBoundary Then
+                    Dim tmp As Long: tmp = sBoundary: sBoundary = eBoundary: eBoundary = tmp
                 End If
-                Dim sIdx As Long, eIdx As Long
-                sIdx = CLng(slotMap(sLbl))
-                eIdx = CLng(slotMap(eLbl))
-                If eIdx < sIdx Then
-                    Dim tmp As Long: tmp = sIdx: sIdx = eIdx: eIdx = tmp
+                ' ブロック範囲 = [sBoundary, eBoundary - 1] のスロット
+                ' 例: 9時 から 17時 → boundary 1〜9 → block slot 1..8
+                If eBoundary > sBoundary Then
+                    If coll Is Nothing Then Set coll = New Collection
+                    coll.Add Array(sBoundary, eBoundary - 1)
                 End If
-                coll.Add Array(sIdx, eIdx)
             End If
         Next k
         If Not coll Is Nothing Then
@@ -320,6 +323,40 @@ NEXT_R:
     Set d("ポジション") = posByName
     Set d("除外") = exclByName
     Set LoadDailyInput = d
+End Function
+
+Private Function BuildTimeMarkerMap() As Object
+    ' 時刻境界ラベル → boundary index (0..25) の辞書
+    ' 26境界 = 25スロットの両端
+    Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
+    d.CompareMode = vbTextCompare
+    d("8:40") = 0
+    d("9時") = 1
+    d("10時") = 2
+    d("11時") = 3
+    d("12時") = 4
+    d("13時") = 5
+    d("14時") = 6
+    d("15時") = 7
+    d("16時") = 8
+    d("17時") = 9
+    d("18時") = 10
+    d("19時") = 11
+    d("20時") = 12
+    d("21時") = 13
+    d("22時") = 14
+    d("23時") = 15
+    d("0時") = 16
+    d("1時") = 17
+    d("2時") = 18
+    d("3時") = 19
+    d("4時") = 20
+    d("5時") = 21
+    d("6時") = 22
+    d("7時") = 23
+    d("8時") = 24
+    d("8:40(翌)") = 25
+    Set BuildTimeMarkerMap = d
 End Function
 
 Private Function IsChecked(v As Variant) As Boolean
