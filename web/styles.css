@@ -1,0 +1,106 @@
+* { box-sizing: border-box; }
+body {
+  font-family: "Hiragino Sans", "Yu Gothic", "Meiryo", system-ui, sans-serif;
+  margin: 0; padding: 0;
+  background: #f4f6f9;
+  color: #222;
+}
+header {
+  background: #1f3a5f;
+  color: #fff;
+  padding: 12px 16px;
+  box-shadow: 0 2px 4px rgba(0,0,0,.1);
+  position: sticky; top: 0; z-index: 10;
+}
+header h1 { margin: 0 0 8px; font-size: 18px; }
+header h1 .sub { font-size: 12px; font-weight: normal; opacity: .75; margin-left: 8px; }
+
+nav.tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.tab {
+  background: transparent; border: 1px solid transparent;
+  color: #cfd8e3; padding: 6px 14px; border-radius: 6px 6px 0 0;
+  cursor: pointer; font-size: 14px;
+}
+.tab:hover { background: rgba(255,255,255,.08); }
+.tab.active {
+  background: #f4f6f9; color: #1f3a5f;
+  border-color: #1f3a5f;
+  font-weight: bold;
+}
+
+.actions {
+  margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap;
+}
+.actions button {
+  padding: 6px 14px;
+  border: 1px solid #ccd;
+  background: #fff;
+  color: #1f3a5f;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.actions button:hover { background: #eef3fa; }
+.actions .primary { background: #ffb347; color: #4a2800; border-color: #cc8d2a; font-weight: bold; }
+.actions .primary:hover { background: #ffa21f; }
+.actions .danger { color: #a33; border-color: #eaa; }
+.actions .danger:hover { background: #fee; }
+
+main { padding: 16px; max-width: 100%; }
+.panel { display: none; background: #fff; border: 1px solid #dde3ec; border-radius: 6px; padding: 16px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+.panel.active { display: block; }
+.panel h2 { margin-top: 0; }
+
+.toolbar { display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+.toolbar button { padding: 5px 10px; border: 1px solid #ccd; background: #fff; border-radius: 4px; cursor: pointer; }
+.toolbar button:hover { background: #eef3fa; }
+.toolbar button.danger { color: #a33; border-color: #eaa; }
+.toolbar label { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.toolbar input, .toolbar select { padding: 4px 6px; border: 1px solid #bbc; border-radius: 3px; }
+
+.hint { font-size: 13px; color: #556; background: #f0f4fa; padding: 8px 12px; border-left: 3px solid #1f3a5f; margin: 0 0 12px; border-radius: 0 4px 4px 0; }
+
+.table-wrap { overflow-x: auto; max-width: 100%; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; background: #fff; }
+th, td { border: 1px solid #ccd; padding: 4px 6px; text-align: center; }
+th { background: #dce6f1; font-weight: bold; white-space: nowrap; }
+thead tr.sub-head th { background: #ecf1f8; font-size: 11px; font-weight: normal; }
+
+tbody td input[type=text],
+tbody td input[type=number],
+tbody td select {
+  width: 100%; border: none; padding: 3px 4px; font: inherit;
+  background: transparent;
+}
+tbody td input[type=text]:focus,
+tbody td select:focus { background: #fffce0; outline: 2px solid #ffb347; }
+tbody td.output { background: #e2efda; font-weight: bold; }
+tbody td.input-cell { background: #fff2cc; }
+tbody td.block { background: #bfbfbf; color: #444; font-weight: bold; }
+tbody td.block-toggle { cursor: pointer; user-select: none; }
+tbody td.check-cell input { width: 18px; height: 18px; }
+
+.warnings { margin-top: 16px; padding: 10px 14px; background: #fff6e0; border-left: 3px solid #d49a00; font-size: 13px; white-space: pre-wrap; border-radius: 0 4px 4px 0; }
+.warnings:empty { display: none; }
+
+#table-positions td:first-child { text-align: left; }
+#table-positions td.block-toggle { min-width: 26px; padding: 2px; }
+#table-positions .pos-name { width: 140px; }
+
+#table-daily td { padding: 2px 4px; }
+#table-daily select, #table-daily input[type=text] { min-width: 70px; }
+
+.print-table { font-size: 14px; }
+.print-table td { height: 28px; }
+
+.row-del { border: none; background: transparent; color: #a33; cursor: pointer; font-size: 15px; }
+.row-del:hover { color: #d00; }
+
+@media print {
+  header, .tabs, .actions, .toolbar, .hint, nav { display: none !important; }
+  .panel { display: none; border: none; box-shadow: none; padding: 0; }
+  #tab-output.active { display: block; }
+  #warnings { display: none; }
+  body { background: #fff; }
+  .print-table { font-size: 12px; }
+}

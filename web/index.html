@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>執務表 自動化 (Web版)</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<header>
+  <h1>執務表 自動化 <span class="sub">Web版</span></h1>
+  <nav class="tabs">
+    <button class="tab active" data-tab="output">執務表</button>
+    <button class="tab" data-tab="daily">当日チェック</button>
+    <button class="tab" data-tab="positions">ポジション定義</button>
+    <button class="tab" data-tab="roster">名簿</button>
+    <button class="tab" data-tab="history">履歴</button>
+    <button class="tab" data-tab="help">使い方</button>
+  </nav>
+  <div class="actions">
+    <button id="btn-generate" class="primary">本日を生成</button>
+    <button id="btn-show-history">過去日表示</button>
+    <button id="btn-export">エクスポート</button>
+    <button id="btn-import">インポート</button>
+    <input type="file" id="file-import" accept="application/json" hidden />
+    <button id="btn-reset" class="danger">初期化</button>
+  </div>
+</header>
+
+<main>
+  <!-- =================== 執務表 =================== -->
+  <section id="tab-output" class="panel active">
+    <div class="toolbar">
+      <label>表示日付 <input type="date" id="out-date" /></label>
+      <button id="btn-print">印刷</button>
+    </div>
+    <table id="table-output" class="print-table">
+      <thead>
+        <tr><th rowspan="2">時間</th><th colspan="3">通信指令</th><th colspan="3">受付</th></tr>
+        <tr>
+          <th>一次指定者</th><th>指定変更 従事者</th><th>時間</th>
+          <th>一次指定者</th><th>指定変更 従事者</th><th>時間</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div id="warnings" class="warnings"></div>
+  </section>
+
+  <!-- =================== 当日チェック =================== -->
+  <section id="tab-daily" class="panel">
+    <div class="toolbar">
+      <label>当番日 <input type="date" id="daily-date" /></label>
+      <label>休日フラグ
+        <select id="daily-holiday"><option value="0">平日</option><option value="1">休日</option></select>
+      </label>
+    </div>
+    <p class="hint">各隊員の今日の状態を入力。<b>休暇/当直/食当</b> はチェックで該当ポジションを自動付与。<b>ポジション1/2</b> で隊の指定（複数ポジション兼務可）。半日不在は<b>除外時間帯</b>を時刻境界で指定（例: 9時〜17時）。</p>
+    <div class="table-wrap">
+      <table id="table-daily">
+        <thead>
+          <tr>
+            <th>No</th><th>氏名</th>
+            <th>休暇</th><th>当直</th><th>食当</th>
+            <th>ポジション1</th><th>ポジション2</th>
+            <th colspan="2">除外1</th>
+            <th colspan="2">除外2</th>
+            <th>備考</th>
+          </tr>
+          <tr class="sub-head">
+            <th></th><th></th><th></th><th></th><th></th><th></th><th></th>
+            <th>から</th><th>まで</th><th>から</th><th>まで</th><th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- =================== ポジション定義 =================== -->
+  <section id="tab-positions" class="panel">
+    <p class="hint"><b>×</b> を入れた時間帯は、そのポジションの隊員に一次指定者を割当てない。空白は割当可。行の追加/編集/削除で業務ルール変更が完結。</p>
+    <div class="toolbar">
+      <button id="btn-pos-add">行を追加</button>
+      <button id="btn-pos-reset">初期値に戻す</button>
+    </div>
+    <div class="table-wrap">
+      <table id="table-positions">
+        <thead><tr id="pos-head"></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- =================== 名簿 =================== -->
+  <section id="tab-roster" class="panel">
+    <p class="hint">氏名のみ。並び順は表示順にそのまま反映されます。</p>
+    <div class="toolbar">
+      <button id="btn-roster-add">行を追加</button>
+    </div>
+    <div class="table-wrap">
+      <table id="table-roster">
+        <thead><tr><th>No</th><th>氏名</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- =================== 履歴 =================== -->
+  <section id="tab-history" class="panel">
+    <p class="hint">GenerateShift 実行時に自動追記されます。前日と同じ時間帯での連続割当回避や、前日の1つ上にずらす優先判定に使われます。</p>
+    <div class="toolbar">
+      <button id="btn-history-clear" class="danger">履歴を全削除</button>
+    </div>
+    <div class="table-wrap">
+      <table id="table-history">
+        <thead><tr><th>当番日</th><th>時間帯</th><th>通信指令</th><th>受付</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- =================== 使い方 =================== -->
+  <section id="tab-help" class="panel">
+    <h2>使い方</h2>
+    <h3>初回</h3>
+    <ol>
+      <li><b>名簿</b>タブに隊員の氏名を入力（最大30名想定、追加行はボタンで）</li>
+      <li><b>ポジション定義</b>タブで ×（ブロック時間帯）を確認・編集。初期値で救急隊/休暇/研修は全時間ブロック、食当は14-17、当直は18-20と6-8等が設定済み。</li>
+    </ol>
+    <h3>毎当番</h3>
+    <ol>
+      <li><b>当日チェック</b>で:
+        <ul>
+          <li>当番日を設定</li>
+          <li>休暇/当直/食当に ○（チェック）を入れる（該当ポジションが自動適用）</li>
+          <li>ポジション1/2 で警防態勢の隊を指定（兼務は2つ選ぶ）</li>
+          <li>半日不在等は除外1/2 に時刻境界で範囲入力（例: 9時〜17時）</li>
+        </ul>
+      </li>
+      <li>ヘッダー右の<b>本日を生成</b>ボタン</li>
+      <li>印刷ボタン or コピーで出力</li>
+    </ol>
+    <h3>ルール変更</h3>
+    <p>VBA書き換え不要。<b>ポジション定義</b>シートを編集するだけで各署所の運用に適合。</p>
+    <h3>背景にあるスケジューリング規則</h3>
+    <ul>
+      <li>通信と受付は同時刻で別人</li>
+      <li>12勤と17勤は別人</li>
+      <li>深夜(22-4時)は一人1回まで</li>
+      <li>夜20時以降は前日同時刻と別人（強回避）</li>
+      <li>前日の1つ上にずらす傾向</li>
+      <li>10-17時は一人最低1回勤務</li>
+      <li>連続割当を軽回避・全体の回数を平準化</li>
+    </ul>
+    <h3>データ保存</h3>
+    <p>入力はすべてブラウザの localStorage に自動保存。<b>エクスポート</b>でJSONバックアップ、<b>インポート</b>で復元。機種変更やチーム共有はこのJSONで。</p>
+  </section>
+</main>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
