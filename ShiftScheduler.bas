@@ -1,75 +1,74 @@
 Attribute VB_Name = "ShiftScheduler"
 ' =============================================================
-' 執務表 一次指定者 自動生成マクロ
-'   エントリポイント: GenerateShift
-'   依存シート:       執務表 / 当日入力 / 名簿 / 前日実績 / 設定
+' 執務表 一次指定者 自動生成マクロ (完全データ駆動版)
+'   エントリポイント: GenerateShift / ShowDateFromHistory
+'
+' ポジション×時間帯のブロック設定はすべて「ポジション定義」シートで管理。
+' VBAには業務ルールのハードコードなし。
 ' =============================================================
 Option Explicit
 
 Private Const SHEET_OUT As String = "執務表"
 Private Const SHEET_INPUT As String = "当日チェック"
-Private Const SHEET_EXCL As String = "除外要件"
+Private Const SHEET_POS As String = "ポジション定義"
 Private Const SHEET_ROSTER As String = "名簿"
 Private Const SHEET_HISTORY As String = "履歴"
-Private Const SHEET_SET As String = "設定"
 
-Private Const ROW_CHECK_START As Long = 7     ' 当日チェック マトリクス開始行
-Private Const ROW_CHECK_END As Long = 36      ' 〃 終了行 (30名分)
-Private Const ROW_EXCL_START As Long = 5      ' 除外要件 データ開始行
+Private Const ROW_SLOT_START As Long = 5
+Private Const ROW_POS_START As Long = 5          ' ポジション定義 データ開始行
+Private Const ROW_POS_END As Long = 54           ' 〃 (50行バッファ)
+Private Const ROW_CHECK_START As Long = 7
+Private Const ROW_CHECK_END As Long = 36
+Private Const ROW_HIST_START As Long = 5
+Private Const N_SLOTS As Long = 25
 
-Private Const ROW_SLOT_START As Long = 5      ' 執務表/設定 の時間枠開始行
-Private Const ROW_HIST_START As Long = 5      ' 履歴 のデータ開始行
-Private Const N_SLOTS As Long = 25            ' 時間枠数
-
-' 時間枠インデックス定数 (0 origin)
-Private Const S_8_9 As Long = 0     ' 8:40〜9
-Private Const S_9_10 As Long = 1    ' 9〜10
+' スコアリング用の時間帯定数 (0 origin)
 Private Const S_10_11 As Long = 2
 Private Const S_12_13 As Long = 4
-Private Const S_14_15 As Long = 6
 Private Const S_17_18 As Long = 9
 Private Const S_18_19 As Long = 10
 Private Const S_20_21 As Long = 12
 Private Const S_22_23 As Long = 14
-Private Const S_0_1 As Long = 16
 Private Const S_4_5 As Long = 20
-Private Const S_6_7 As Long = 22
-Private Const S_8_840 As Long = 24
 
+' =============================================================
+' メインエントリ: 執務表を生成して履歴に追記
+' =============================================================
 Public Sub GenerateShift()
     On Error GoTo EH
     Application.ScreenUpdating = False
 
-    Dim roster As Object:    Set roster = LoadRoster()            ' name -> role
+    Dim slots() As String: slots = ReadTimeSlots()
+
+    Dim roster As Object: Set roster = LoadRoster()
     If roster.Count = 0 Then
-        MsgBox "名簿シートが空です。氏名と役職カテゴリを入力してください。", vbExclamation
+        MsgBox "名簿シートが空です。氏名を入力してください。", vbExclamation
         GoTo DONE_EXIT
     End If
 
-    Dim daily As Object:     Set daily = LoadDailyInput()
-    Dim todayDate As Date
+    Dim positions As Object: Set positions = LoadPositions(slots)
+    ' positions("ポジション名") -> Dictionary(slotIdx -> True) (ブロックセット)
+
+    Dim daily As Object: Set daily = LoadDailyInput(slots)
+    ' daily("当番日"), daily("休日"),
+    ' daily("ポジション") -> Dict: name -> position_name
+    ' daily("除外")       -> Dict: name -> Collection of Array(startIdx, endIdx)
+
     If Not IsDate(daily("当番日")) Then
         MsgBox "当日チェックシートの B3 に当番日 (yyyy/m/d) を入力してください。", vbExclamation
         GoTo DONE_EXIT
     End If
-    todayDate = CDate(daily("当番日"))
+    Dim todayDate As Date: todayDate = CDate(daily("当番日"))
 
-    ' 除外要件 (方面訓練・研修・出向・イベント等) をロードして daily に入れる
-    Set daily("除外") = LoadExclusions(todayDate)
+    Dim prevDay As Object: Set prevDay = LoadPrevDayFromHistory(todayDate, slots)
 
-    Dim prevDay As Object:   Set prevDay = LoadPrevDayFromHistory(todayDate)
-    Dim settings As Object:  Set settings = LoadSettings()        ' (slot|role) -> mark
-
-    Dim slots() As String:   slots = ReadTimeSlots()
-
-    ' 当日勤務可能な隊員リスト (休暇を除外。半日不在は時間枠単位で IsBlocked)
-    Dim members As Variant: members = AvailableMembers(roster, daily)
+    ' 各人が「今日全スロット×」なら勤務可否リストから除外
+    Dim members As Variant: members = AvailableMembers(roster, daily, positions, slots)
     If IsEmptyArray(members) Then
-        MsgBox "割当可能な隊員が0名です。名簿と当日入力を確認してください。", vbExclamation
+        MsgBox "割当可能な隊員が0名です。名簿・当日チェックを確認してください。", vbExclamation
         GoTo DONE_EXIT
     End If
 
-    ' 割当結果の格納: 2 枠 (通信=0 / 受付=1) × N_SLOTS
     Dim assign(0 To 1, 0 To N_SLOTS - 1) As String
     Dim workCount As Object: Set workCount = CreateObject("Scripting.Dictionary")
     Dim i As Long
@@ -77,32 +76,25 @@ Public Sub GenerateShift()
         workCount(CStr(members(i))) = 0
     Next i
 
-    ' メインループ: 10-17時(daytime) を先に、次に夜間、最後に朝8:40-10
-    ' これで 10-17時カバレッジを確実にする
-    Dim slotOrder() As Long
-    slotOrder = BuildSlotProcessOrder()
+    ' 処理順: 10-17 → 17-24 → 0-8 → 8-8:40 → 8:40-10
+    Dim slotOrder() As Long: slotOrder = BuildSlotProcessOrder()
     Dim k As Long, slotIdx As Long, col As Long
     For k = 0 To UBound(slotOrder)
         slotIdx = slotOrder(k)
-        For col = 0 To 1  ' 0=通信, 1=受付
+        For col = 0 To 1
             assign(col, slotIdx) = PickAssignee( _
-                col, slotIdx, slots, members, roster, _
-                daily, prevDay, settings, assign, workCount)
+                col, slotIdx, members, roster, daily, positions, _
+                prevDay, assign, workCount)
         Next col
     Next k
 
-    ' 制約修正パス: 12勤 と 17勤 が同じ人なら入れ替え
-    Call EnforceDistinct12_17(assign, members, roster, daily, settings, slots)
+    Call EnforceDistinct12_17(assign, members, roster, daily, positions)
 
-    ' 出力
-    Call WriteOutput(assign, slots, todayDate)
-
-    ' 履歴に追記 (既存同日分は上書き)
+    Call WriteOutput(assign, todayDate)
     Call AppendToHistory(assign, slots, todayDate)
 
-    ' 検証 & 警告コメント
     Dim warnings As String
-    warnings = Validate(assign, roster, daily, prevDay, slots)
+    warnings = Validate(assign, roster, daily, positions, prevDay, slots)
     If Len(warnings) > 0 Then
         MsgBox "生成完了。履歴にも追記しました。" & vbCrLf & vbCrLf & _
                "以下の注意点を確認してください:" & vbCrLf & warnings, vbInformation
@@ -115,31 +107,141 @@ DONE_EXIT:
     Exit Sub
 EH:
     Application.ScreenUpdating = True
-    MsgBox "エラー: " & Err.Description & " (行 " & Erl & ")", vbCritical
+    MsgBox "エラー: " & Err.Description, vbCritical
 End Sub
 
 ' =============================================================
-' データ読み込み
+' 履歴から過去日を表示
 ' =============================================================
+Public Sub ShowDateFromHistory()
+    On Error GoTo EH
+    Application.ScreenUpdating = False
+
+    Dim wsOut As Worksheet: Set wsOut = ThisWorkbook.Worksheets(SHEET_OUT)
+    Dim dv As Variant: dv = wsOut.Range("B2").Value
+    If Not IsDate(dv) Then
+        MsgBox "執務表シートの B2 に yyyy/m/d 形式で日付を入力してください。", vbExclamation
+        GoTo DONE_EXIT
+    End If
+    Dim targetDate As Date: targetDate = CDate(dv)
+
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_HISTORY)
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    If lastRow < ROW_HIST_START Then
+        MsgBox "履歴が空です。", vbExclamation
+        GoTo DONE_EXIT
+    End If
+
+    Dim i As Long
+    For i = 0 To N_SLOTS - 1
+        wsOut.Cells(ROW_SLOT_START + i, 2).Value = ""
+        wsOut.Cells(ROW_SLOT_START + i, 5).Value = ""
+    Next i
+
+    Dim slots() As String: slots = ReadTimeSlots()
+    Dim slotMap As Object: Set slotMap = BuildSlotLabelMap(slots)
+    Dim found As Boolean: found = False
+    Dim r As Long, v As Variant
+    For r = ROW_HIST_START To lastRow
+        v = ws.Cells(r, 1).Value
+        If IsDate(v) Then
+            If CDate(v) = targetDate Then
+                found = True
+                Dim slotLabel As String
+                slotLabel = Trim(CStr(Nz(ws.Cells(r, 2).Value, "")))
+                If slotMap.Exists(slotLabel) Then
+                    Dim idx As Long: idx = CLng(slotMap(slotLabel))
+                    wsOut.Cells(ROW_SLOT_START + idx, 2).Value = _
+                        Trim(CStr(Nz(ws.Cells(r, 3).Value, "")))
+                    wsOut.Cells(ROW_SLOT_START + idx, 5).Value = _
+                        Trim(CStr(Nz(ws.Cells(r, 4).Value, "")))
+                End If
+            End If
+        End If
+    Next r
+
+    wsOut.Activate
+    If Not found Then
+        MsgBox "指定日付のデータが履歴に見つかりません: " & _
+               Format(targetDate, "yyyy/m/d"), vbExclamation
+    End If
+
+DONE_EXIT:
+    Application.ScreenUpdating = True
+    Exit Sub
+EH:
+    Application.ScreenUpdating = True
+    MsgBox "エラー: " & Err.Description, vbCritical
+End Sub
+
+' =============================================================
+' データ読込
+' =============================================================
+Private Function ReadTimeSlots() As String()
+    ' 執務表シートの A5..A29 から時間帯ラベルを読む
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_OUT)
+    Dim arr(0 To N_SLOTS - 1) As String
+    Dim i As Long
+    For i = 0 To N_SLOTS - 1
+        arr(i) = CStr(ws.Cells(ROW_SLOT_START + i, 1).Value)
+    Next i
+    ReadTimeSlots = arr
+End Function
+
+Private Function BuildSlotLabelMap(slots() As String) As Object
+    Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
+    d.CompareMode = vbTextCompare
+    Dim i As Long
+    For i = 0 To UBound(slots)
+        d(slots(i)) = i
+    Next i
+    Set BuildSlotLabelMap = d
+End Function
+
 Private Function LoadRoster() As Object
+    ' 氏名の一覧 (名簿シート B2:B31)
     Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
     d.CompareMode = vbTextCompare
     Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_ROSTER)
-    Dim r As Long, name As String, role As String
+    Dim r As Long, name As String
     For r = 2 To 31
-        name = Trim(CStr(ws.Cells(r, 2).Value))
-        role = Trim(CStr(ws.Cells(r, 3).Value))
+        name = Trim(CStr(Nz(ws.Cells(r, 2).Value, "")))
         If Len(name) > 0 And Left(name, 1) <> "例" Then
-            d(name) = role
+            d(name) = True
         End If
     Next r
     Set LoadRoster = d
 End Function
 
-Private Function LoadDailyInput() As Object
-    ' 当日チェックシートのマトリクスを読む
-    ' B3: 当番日, B4: 休日フラグ
-    ' 6行目ヘッダ、7〜36行目データ (氏名/休暇/食当/当直主任/当直副主任/備考)
+Private Function LoadPositions(slots() As String) As Object
+    ' ポジション定義シートを読む
+    ' 戻り値: position_name -> Dictionary(slotIdx -> True) のブロックセット
+    Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
+    d.CompareMode = vbTextCompare
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_POS)
+
+    Dim r As Long, posName As String
+    For r = ROW_POS_START To ROW_POS_END
+        posName = Trim(CStr(Nz(ws.Cells(r, 1).Value, "")))
+        If Len(posName) > 0 Then
+            Dim blocks As Object: Set blocks = CreateObject("Scripting.Dictionary")
+            Dim j As Long
+            For j = 0 To N_SLOTS - 1
+                Dim cellVal As String
+                cellVal = Trim(CStr(Nz(ws.Cells(r, 2 + j).Value, "")))
+                If InStr(cellVal, "×") > 0 Or LCase(cellVal) = "x" Then
+                    blocks(j) = True
+                End If
+            Next j
+            Set d(posName) = blocks
+        End If
+    Next r
+    Set LoadPositions = d
+End Function
+
+Private Function LoadDailyInput(slots() As String) As Object
+    ' 当日チェックシートを読む
     Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
     d.CompareMode = vbTextCompare
     Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_INPUT)
@@ -147,80 +249,61 @@ Private Function LoadDailyInput() As Object
     d("当番日") = ws.Range("B3").Value
     d("休日") = CLng(Nz(ws.Range("B4").Value, 0))
 
-    Dim 休暇 As Object: Set 休暇 = CreateObject("Scripting.Dictionary"): 休暇.CompareMode = vbTextCompare
-    Dim 食当 As Object: Set 食当 = CreateObject("Scripting.Dictionary"): 食当.CompareMode = vbTextCompare
-    Dim 当直主任 As String, 当直副主任 As String
-    当直主任 = "": 当直副主任 = ""
+    Dim posByName As Object: Set posByName = CreateObject("Scripting.Dictionary")
+    posByName.CompareMode = vbTextCompare
+    Dim exclByName As Object: Set exclByName = CreateObject("Scripting.Dictionary")
+    exclByName.CompareMode = vbTextCompare
 
-    Dim r As Long, name As String
+    Dim slotMap As Object: Set slotMap = BuildSlotLabelMap(slots)
+
+    Dim r As Long
     For r = ROW_CHECK_START To ROW_CHECK_END
+        Dim name As String
         name = Trim(CStr(Nz(ws.Cells(r, 2).Value, "")))
-        If Len(name) > 0 Then
-            If IsChecked(ws.Cells(r, 3).Value) Then 休暇(name) = True   ' C列: 休暇
-            If IsChecked(ws.Cells(r, 4).Value) Then 食当(name) = True   ' D列: 食当
-            If IsChecked(ws.Cells(r, 5).Value) And Len(当直主任) = 0 Then 当直主任 = name  ' E列
-            If IsChecked(ws.Cells(r, 6).Value) And Len(当直副主任) = 0 Then 当直副主任 = name  ' F列
+        If Len(name) = 0 Then GoTo NEXT_R
+
+        Dim pos As String
+        pos = Trim(CStr(Nz(ws.Cells(r, 3).Value, "")))
+        If Len(pos) > 0 Then posByName(name) = pos
+
+        ' 除外1-3 (列 D..I = 4..9) の3セット
+        Dim k As Long, coll As Collection
+        Set coll = Nothing
+        For k = 0 To 2
+            Dim sCol As Long, eCol As Long
+            sCol = 4 + k * 2
+            eCol = sCol + 1
+            Dim sLbl As String, eLbl As String
+            sLbl = Trim(CStr(Nz(ws.Cells(r, sCol).Value, "")))
+            eLbl = Trim(CStr(Nz(ws.Cells(r, eCol).Value, "")))
+            If slotMap.Exists(sLbl) And slotMap.Exists(eLbl) Then
+                If coll Is Nothing Then
+                    Set coll = New Collection
+                End If
+                Dim sIdx As Long, eIdx As Long
+                sIdx = CLng(slotMap(sLbl))
+                eIdx = CLng(slotMap(eLbl))
+                If eIdx < sIdx Then
+                    ' 終了<開始 なら範囲逆なので入れ替え
+                    Dim tmp As Long: tmp = sIdx: sIdx = eIdx: eIdx = tmp
+                End If
+                coll.Add Array(sIdx, eIdx)
+            End If
+        Next k
+        If Not coll Is Nothing Then
+            Set exclByName(name) = coll
         End If
+NEXT_R:
     Next r
 
-    Set d("休暇") = 休暇
-    Set d("食当") = 食当
-    d("当直主任") = 当直主任
-    d("当直副主任") = 当直副主任
-
+    Set d("ポジション") = posByName
+    Set d("除外") = exclByName
     Set LoadDailyInput = d
 End Function
 
-Private Function IsChecked(v As Variant) As Boolean
-    ' 任意の非空文字 (○・✓・X 等) を True とみなす
-    If IsNull(v) Or IsEmpty(v) Then IsChecked = False: Exit Function
-    IsChecked = (Len(Trim(CStr(v))) > 0)
-End Function
-
-Private Function LoadExclusions(targetDate As Date) As Object
-    ' 除外要件シート: name -> Collection of Array(startIdx, endIdx)
-    Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
-    d.CompareMode = vbTextCompare
-    Dim ws As Worksheet
-    On Error Resume Next
-    Set ws = ThisWorkbook.Worksheets(SHEET_EXCL)
-    On Error GoTo 0
-    If ws Is Nothing Then Set LoadExclusions = d: Exit Function
-
-    Dim lastRow As Long
-    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
-    If lastRow < ROW_EXCL_START Then Set LoadExclusions = d: Exit Function
-
-    Dim slotMap As Object: Set slotMap = BuildSlotLabelMap()
-    Dim r As Long, v As Variant
-    For r = ROW_EXCL_START To lastRow
-        v = ws.Cells(r, 1).Value
-        If IsDate(v) Then
-            If CDate(v) = targetDate Then
-                Dim name As String
-                name = Trim(CStr(Nz(ws.Cells(r, 2).Value, "")))
-                Dim sLbl As String, eLbl As String
-                sLbl = Trim(CStr(Nz(ws.Cells(r, 3).Value, "")))
-                eLbl = Trim(CStr(Nz(ws.Cells(r, 4).Value, "")))
-                If Len(name) > 0 And slotMap.Exists(sLbl) And slotMap.Exists(eLbl) Then
-                    If Not d.Exists(name) Then
-                        Dim c As Collection: Set c = New Collection
-                        Set d(name) = c
-                    End If
-                    d(name).Add Array(CLng(slotMap(sLbl)), CLng(slotMap(eLbl)))
-                End If
-            End If
-        End If
-    Next r
-    Set LoadExclusions = d
-End Function
-
-Private Function LoadPrevDayFromHistory(beforeDate As Date) As Object
-    ' 履歴シートから beforeDate より前の最新当番日のレコードを返す
-    ' 戻り値: slot_index -> Variant array(0=通信, 1=受付)
+Private Function LoadPrevDayFromHistory(beforeDate As Date, slots() As String) As Object
     Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
     Dim i As Long
-    ' 空で初期化
     For i = 0 To N_SLOTS - 1
         d(i) = Array("", "")
     Next i
@@ -230,33 +313,26 @@ Private Function LoadPrevDayFromHistory(beforeDate As Date) As Object
     lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
     If lastRow < ROW_HIST_START Then Set LoadPrevDayFromHistory = d: Exit Function
 
-    ' 前当番日 = beforeDate より小さい最大の日付
     Dim maxDate As Date: maxDate = 0
     Dim r As Long, v As Variant, cellDate As Date
     For r = ROW_HIST_START To lastRow
         v = ws.Cells(r, 1).Value
         If IsDate(v) Then
             cellDate = CDate(v)
-            If cellDate < beforeDate And cellDate > maxDate Then
-                maxDate = cellDate
-            End If
+            If cellDate < beforeDate And cellDate > maxDate Then maxDate = cellDate
         End If
     Next r
-    If maxDate = 0 Then
-        Set LoadPrevDayFromHistory = d
-        Exit Function
-    End If
+    If maxDate = 0 Then Set LoadPrevDayFromHistory = d: Exit Function
 
-    ' maxDate の 25 行を読み込む
-    Dim slotMap As Object: Set slotMap = BuildSlotLabelMap()
+    Dim slotMap As Object: Set slotMap = BuildSlotLabelMap(slots)
     For r = ROW_HIST_START To lastRow
         v = ws.Cells(r, 1).Value
         If IsDate(v) Then
             If CDate(v) = maxDate Then
-                Dim slotLabel As String
-                slotLabel = Trim(CStr(Nz(ws.Cells(r, 2).Value, "")))
-                If slotMap.Exists(slotLabel) Then
-                    Dim idx As Long: idx = CLng(slotMap(slotLabel))
+                Dim lbl As String
+                lbl = Trim(CStr(Nz(ws.Cells(r, 2).Value, "")))
+                If slotMap.Exists(lbl) Then
+                    Dim idx As Long: idx = CLng(slotMap(lbl))
                     d(idx) = Array( _
                         Trim(CStr(Nz(ws.Cells(r, 3).Value, ""))), _
                         Trim(CStr(Nz(ws.Cells(r, 4).Value, ""))) _
@@ -268,66 +344,24 @@ Private Function LoadPrevDayFromHistory(beforeDate As Date) As Object
     Set LoadPrevDayFromHistory = d
 End Function
 
-Private Function BuildSlotLabelMap() As Object
-    ' 時間帯ラベル -> index の辞書
-    Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
-    d.CompareMode = vbTextCompare
-    Dim slots() As String: slots = ReadTimeSlots()
-    Dim i As Long
-    For i = 0 To N_SLOTS - 1
-        d(slots(i)) = i
-    Next i
-    Set BuildSlotLabelMap = d
-End Function
-
-Private Function LoadSettings() As Object
-    ' key = slot_index & "|" & role -> mark text
-    Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
-    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_SET)
-    Dim roles() As String: roles = ReadRoleHeaders(ws)
-    Dim i As Long, j As Long, v As String
-    For i = 0 To N_SLOTS - 1
-        For j = 0 To UBound(roles)
-            v = Trim(CStr(ws.Cells(ROW_SLOT_START + i, 2 + j).Value))
-            If Len(v) > 0 Then
-                d(i & "|" & roles(j)) = v
-            End If
-        Next j
-    Next i
-    Set LoadSettings = d
-End Function
-
-Private Function ReadRoleHeaders(ws As Worksheet) As String()
-    Dim arr(0 To 7) As String
-    Dim j As Long
-    For j = 0 To 7
-        arr(j) = Trim(CStr(ws.Cells(4, 2 + j).Value))
-    Next j
-    ReadRoleHeaders = arr
-End Function
-
-Private Function ReadTimeSlots() As String()
-    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_SET)
-    Dim arr(0 To N_SLOTS - 1) As String
-    Dim i As Long
-    For i = 0 To N_SLOTS - 1
-        arr(i) = CStr(ws.Cells(ROW_SLOT_START + i, 1).Value)
-    Next i
-    ReadTimeSlots = arr
-End Function
-
 ' =============================================================
-' 可用メンバー抽出
+' 可用メンバー = 1日全スロット × でない人
 ' =============================================================
-Private Function AvailableMembers(roster As Object, daily As Object) As Variant
-    ' 戻り値は Variant 配列。呼び出し側は len = CountAvailable で判定する。
+Private Function AvailableMembers(roster As Object, daily As Object, _
+    positions As Object, slots() As String) As Variant
     Dim col As Collection: Set col = New Collection
     Dim k As Variant
     For Each k In roster.Keys
-        ' 休暇のみ全員除外。半日不在(除外要件)は時間帯単位で後段が処理
-        If Not daily("休暇").Exists(CStr(k)) Then
-            col.Add CStr(k)
-        End If
+        ' 全スロット × でなければ追加
+        Dim hasAny As Boolean: hasAny = False
+        Dim i As Long
+        For i = 0 To N_SLOTS - 1
+            If Not IsBlocked(CStr(k), i, daily, positions) Then
+                hasAny = True
+                Exit For
+            End If
+        Next i
+        If hasAny Then col.Add CStr(k)
     Next k
     If col.Count = 0 Then
         AvailableMembers = Array()
@@ -335,10 +369,10 @@ Private Function AvailableMembers(roster As Object, daily As Object) As Variant
     End If
     Dim arr() As String
     ReDim arr(0 To col.Count - 1)
-    Dim i As Long
-    For i = 1 To col.Count
-        arr(i - 1) = col.Item(i)
-    Next i
+    Dim j As Long
+    For j = 1 To col.Count
+        arr(j - 1) = col.Item(j)
+    Next j
     AvailableMembers = arr
 End Function
 
@@ -351,19 +385,49 @@ Private Function IsEmptyArray(v As Variant) As Boolean
 End Function
 
 ' =============================================================
+' ブロック判定
+' =============================================================
+Private Function IsBlocked(name As String, slotIdx As Long, _
+    daily As Object, positions As Object) As Boolean
+    ' 1) ポジションのマトリクス × をチェック
+    If daily("ポジション").Exists(name) Then
+        Dim pos As String: pos = CStr(daily("ポジション")(name))
+        If positions.Exists(pos) Then
+            If positions(pos).Exists(slotIdx) Then
+                IsBlocked = True
+                Exit Function
+            End If
+        End If
+    End If
+
+    ' 2) 追加除外時間帯
+    If daily("除外").Exists(name) Then
+        Dim coll As Collection: Set coll = daily("除外")(name)
+        Dim it As Variant
+        For Each it In coll
+            If slotIdx >= CLng(it(0)) And slotIdx <= CLng(it(1)) Then
+                IsBlocked = True
+                Exit Function
+            End If
+        Next it
+    End If
+
+    IsBlocked = False
+End Function
+
+' =============================================================
 ' 割当ロジック
 ' =============================================================
 Private Function PickAssignee(col As Long, slotIdx As Long, _
-    slots() As String, members As Variant, roster As Object, _
-    daily As Object, prevDay As Object, settings As Object, _
+    members As Variant, roster As Object, daily As Object, _
+    positions As Object, prevDay As Object, _
     assign() As String, workCount As Object) As String
 
     Dim candidates As Collection: Set candidates = New Collection
-    Dim i As Long, name As String, role As String
+    Dim i As Long, name As String
     For i = LBound(members) To UBound(members)
         name = CStr(members(i))
-        If Not IsBlocked(name, slotIdx, roster, daily, settings, slots) Then
-            ' 同時間帯で通信と受付は別人
+        If Not IsBlocked(name, slotIdx, daily, positions) Then
             If col = 1 Then
                 If assign(0, slotIdx) = name Then GoTo SKIP_ADD
             End If
@@ -377,14 +441,12 @@ SKIP_ADD:
         Exit Function
     End If
 
-    ' スコア最小のものを選ぶ (低いほど優先)
     Dim bestName As String: bestName = ""
     Dim bestScore As Double: bestScore = 1E+18
     Dim c As Variant
     For Each c In candidates
         Dim s As Double
-        s = ScoreCandidate(CStr(c), col, slotIdx, roster, daily, prevDay, _
-                           assign, workCount, members, settings, slots)
+        s = ScoreCandidate(CStr(c), col, slotIdx, prevDay, assign, workCount)
         If s < bestScore Then
             bestScore = s
             bestName = CStr(c)
@@ -397,126 +459,44 @@ SKIP_ADD:
     End If
 End Function
 
-Private Function IsBlocked(name As String, slotIdx As Long, _
-    roster As Object, daily As Object, settings As Object, _
-    slots() As String) As Boolean
-    Dim role As String: role = CStr(roster(name))
-
-    ' 1) 設定シートの × (役職×時間枠の固定ルール)
-    Dim key As String: key = slotIdx & "|" & role
-    If settings.Exists(key) Then
-        If InStr(settings(key), "×") > 0 Then
-            IsBlocked = True
-            Exit Function
-        End If
-    End If
-
-    ' 2) 休暇 → 全時間 ×
-    If daily("休暇").Exists(name) Then
-        IsBlocked = True
-        Exit Function
-    End If
-
-    ' 3) 食当 → 14-17時 ×
-    If daily("食当").Exists(name) Then
-        If slotIdx >= S_14_15 And slotIdx <= S_14_15 + 2 Then  ' 14,15,16
-            IsBlocked = True
-            Exit Function
-        End If
-    End If
-
-    ' 4) 警防力 (役職) → 日中× (休日=1なら緩和)、深夜×
-    If role = "警防力" Then
-        If daily("休日") <> 1 Then
-            If slotIdx >= S_8_9 And slotIdx <= S_17_18 Then
-                IsBlocked = True
-                Exit Function
-            End If
-        End If
-        If slotIdx >= S_0_1 And slotIdx <= S_6_7 - 1 Then
-            IsBlocked = True
-            Exit Function
-        End If
-    End If
-
-    ' 5) 当直主任/副主任 は 18-19時, 6-8時 ×
-    If name = CStr(Nz(daily("当直主任"), "")) Or _
-       name = CStr(Nz(daily("当直副主任"), "")) Then
-        If slotIdx = S_18_19 Or slotIdx = S_18_19 + 1 Or _
-           slotIdx = S_6_7 Or slotIdx = S_6_7 + 1 Then
-            IsBlocked = True
-            Exit Function
-        End If
-    End If
-
-    ' 6) 除外要件 (方面訓練・研修・出向・救助訓練等の半日不在)
-    If daily.Exists("除外") Then
-        If daily("除外").Exists(name) Then
-            Dim coll As Collection: Set coll = daily("除外")(name)
-            Dim item As Variant
-            For Each item In coll
-                If slotIdx >= CLng(item(0)) And slotIdx <= CLng(item(1)) Then
-                    IsBlocked = True
-                    Exit Function
-                End If
-            Next item
-        End If
-    End If
-
-    IsBlocked = False
-End Function
-
 Private Function ScoreCandidate(name As String, col As Long, slotIdx As Long, _
-    roster As Object, daily As Object, prevDay As Object, _
-    assign() As String, workCount As Object, _
-    members As Variant, settings As Object, slots() As String) As Double
-
+    prevDay As Object, assign() As String, workCount As Object) As Double
     Dim score As Double: score = 0
 
-    ' (a) 総勤務回数が少ない人を優先
+    ' (a) 総勤務回数 (バランス)
     score = score + CDbl(workCount(name)) * 10
 
-    ' (b) 前日同時刻と同じ人なら 夜20時以降〜朝までは強ペナルティ
-    Dim prevName As String
-    prevName = prevDay(slotIdx)(col)
+    ' (b) 前日同時刻と同一人物
+    Dim prevName As String: prevName = prevDay(slotIdx)(col)
     If Len(prevName) > 0 And prevName = name Then
         If slotIdx >= S_20_21 Then
-            ' 20時以降〜翌8:40 (slot 12..24) は前日同一人物をほぼ避ける
-            score = score + 1000
+            score = score + 1000   ' 夜20時以降は強回避
         Else
-            ' 日中は軽いペナルティ (ゼロ時〜19時)
-            score = score + 50
+            score = score + 50     ' 日中は軽ペナルティ
         End If
     End If
 
-    ' (c) 前日実績の 1 個上 (=前日 slotIdx+1 の人) を軽く優先 → 「前日の一個上にずらす」
+    ' (c) 前日 slot+1 を軽優先 (前日の1つ上にずらす)
     If slotIdx + 1 <= N_SLOTS - 1 Then
         Dim prevNext As String: prevNext = prevDay(slotIdx + 1)(col)
         If prevNext = name Then score = score - 5
     End If
 
-    ' (d) 警防力は 18-22時を優先
-    If CStr(roster(name)) = "警防力" Then
-        If slotIdx >= S_18_19 And slotIdx <= S_20_21 + 1 Then
-            score = score - 20
-        End If
-    End If
-
-    ' (f) 10-17時未勤務者を強優先: 全員を1回は入れるためスコアを大きく下げる
+    ' (f) 10-17時未勤務者強優先
     If slotIdx >= S_10_11 And slotIdx <= S_17_18 - 1 Then
         If DaytimeCount(name, assign, slotIdx) = 0 Then
             score = score - 200
         End If
     End If
 
-    ' (g) 深夜(22-4時)は一人1回まで: 既に深夜1回ならペナルティ
+    ' (g) 深夜(22-4時)は一人1回まで
     If IsLateNight(slotIdx) Then
         If LateNightCount(name, assign, slotIdx) >= 1 Then
             score = score + 500
         End If
     End If
 
-    ' (h) 12勤と17勤は別人: 既に 12勤にこの人入ってたら 17勤で +500
+    ' (h) 12勤と17勤は別人
     If slotIdx = S_17_18 Then
         If assign(col, S_12_13) = name Then score = score + 500
     End If
@@ -524,43 +504,18 @@ Private Function ScoreCandidate(name As String, col As Long, slotIdx As Long, _
         If assign(col, S_17_18) = name Then score = score + 500
     End If
 
-    ' (i) 直前の同じ枠と連続しないように軽いペナルティ
+    ' (i) 連続割当ペナルティ (時間軸上の前後どちらかが同一人物なら避ける)
     If slotIdx > 0 Then
-        If assign(col, slotIdx - 1) = name Then score = score + 3
+        If assign(col, slotIdx - 1) = name Then score = score + 50
+    End If
+    If slotIdx < N_SLOTS - 1 Then
+        If assign(col, slotIdx + 1) = name Then score = score + 50
     End If
 
     ScoreCandidate = score
 End Function
 
-Private Function BuildSlotProcessOrder() As Long()
-    ' 処理順: 10-17時 (daytime) を最優先 → 夜間 → 深夜 → 朝 8:40-10
-    ' 理由: daytime の (f)未勤務ボーナスを有効にするため、
-    ' 朝8:40-10を先にアサインするとそこに入った人の workCount が上がり daytime で負ける
-    Dim arr(0 To N_SLOTS - 1) As Long
-    Dim n As Long: n = 0
-    Dim i As Long
-    ' 1) 10〜17 (slot 2..8)
-    For i = S_10_11 To S_17_18 - 1
-        arr(n) = i: n = n + 1
-    Next i
-    ' 2) 17〜24 (slot 9..15)
-    For i = 9 To 15
-        arr(n) = i: n = n + 1
-    Next i
-    ' 3) 0〜8 (slot 16..23)
-    For i = 16 To 23
-        arr(n) = i: n = n + 1
-    Next i
-    ' 4) 8〜8:40 (slot 24)
-    arr(n) = 24: n = n + 1
-    ' 5) 8:40〜9, 9〜10 (slot 0, 1) を最後
-    arr(n) = 0: n = n + 1
-    arr(n) = 1: n = n + 1
-    BuildSlotProcessOrder = arr
-End Function
-
 Private Function IsLateNight(slotIdx As Long) As Boolean
-    ' 22-4時 = S_22_23(14) .. S_4_5(20) の 22〜3時台
     IsLateNight = (slotIdx >= S_22_23 And slotIdx <= S_4_5 - 1)
 End Function
 
@@ -568,7 +523,7 @@ Private Function DaytimeCount(name As String, assign() As String, _
     currentSlot As Long) As Long
     Dim i As Long, col As Long, cnt As Long
     For i = S_10_11 To S_17_18 - 1
-        If i >= currentSlot Then Exit For
+        If i = currentSlot Then Exit For
         For col = 0 To 1
             If assign(col, i) = name Then cnt = cnt + 1
         Next col
@@ -580,7 +535,7 @@ Private Function LateNightCount(name As String, assign() As String, _
     currentSlot As Long) As Long
     Dim i As Long, col As Long, cnt As Long
     For i = S_22_23 To S_4_5 - 1
-        If i >= currentSlot Then Exit For
+        If i = currentSlot Then Exit For
         For col = 0 To 1
             If assign(col, i) = name Then cnt = cnt + 1
         Next col
@@ -589,43 +544,54 @@ Private Function LateNightCount(name As String, assign() As String, _
 End Function
 
 ' =============================================================
+' 処理順 (10-17 を優先)
+' =============================================================
+Private Function BuildSlotProcessOrder() As Long()
+    Dim arr(0 To N_SLOTS - 1) As Long
+    Dim n As Long: n = 0
+    Dim i As Long
+    For i = S_10_11 To S_17_18 - 1    ' 10-17 (slot 2..8)
+        arr(n) = i: n = n + 1
+    Next i
+    For i = 9 To 15                    ' 17-24 (slot 9..15)
+        arr(n) = i: n = n + 1
+    Next i
+    For i = 16 To 23                   ' 0-8 (slot 16..23)
+        arr(n) = i: n = n + 1
+    Next i
+    arr(n) = 24: n = n + 1              ' 8-8:40
+    arr(n) = 0: n = n + 1               ' 8:40-9
+    arr(n) = 1: n = n + 1               ' 9-10
+    BuildSlotProcessOrder = arr
+End Function
+
+' =============================================================
 ' 後処理: 12勤 と 17勤 の重複解消
 ' =============================================================
 Private Sub EnforceDistinct12_17(assign() As String, _
     members As Variant, roster As Object, daily As Object, _
-    settings As Object, slots() As String)
+    positions As Object)
     Dim col As Long
     For col = 0 To 1
         If Len(assign(col, S_12_13)) > 0 And assign(col, S_12_13) = assign(col, S_17_18) Then
-            ' 17勤を別の可能な人に差し替える
             Dim i As Long, alt As String
             For i = LBound(members) To UBound(members)
                 alt = CStr(members(i))
-                If alt <> assign(col, S_12_13) Then
-                    If Not IsBlocked(alt, S_17_18, roster, daily, settings, slots) Then
-                        If 1 - col = 0 Then
-                            If assign(0, S_17_18) <> alt Then
-                                assign(col, S_17_18) = alt
-                                Exit For
-                            End If
-                        Else
-                            If assign(1 - col, S_17_18) <> alt Then
-                                assign(col, S_17_18) = alt
-                                Exit For
-                            End If
-                        End If
-                    End If
-                End If
+                If alt = assign(col, S_12_13) Then GoTo NEXT_ALT
+                If IsBlocked(alt, S_17_18, daily, positions) Then GoTo NEXT_ALT
+                If assign(1 - col, S_17_18) = alt Then GoTo NEXT_ALT
+                assign(col, S_17_18) = alt
+                Exit For
+NEXT_ALT:
             Next i
         End If
     Next col
 End Sub
 
 ' =============================================================
-' 出力
+' 出力 / 履歴追記
 ' =============================================================
-Private Sub WriteOutput(assign() As String, slots() As String, _
-    displayDate As Date)
+Private Sub WriteOutput(assign() As String, displayDate As Date)
     Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_OUT)
     Dim i As Long
     For i = 0 To N_SLOTS - 1
@@ -638,9 +604,6 @@ Private Sub WriteOutput(assign() As String, slots() As String, _
     ws.Cells(ROW_SLOT_START, 2).Select
 End Sub
 
-' =============================================================
-' 履歴への追記 (既存同日分は上書き)
-' =============================================================
 Private Sub AppendToHistory(assign() As String, slots() As String, _
     todayDate As Date)
     Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_HISTORY)
@@ -648,7 +611,6 @@ Private Sub AppendToHistory(assign() As String, slots() As String, _
     lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
     If lastRow < ROW_HIST_START - 1 Then lastRow = ROW_HIST_START - 1
 
-    ' 既存の同日行を削除 (下から)
     Dim r As Long, v As Variant
     For r = lastRow To ROW_HIST_START Step -1
         v = ws.Cells(r, 1).Value
@@ -657,11 +619,9 @@ Private Sub AppendToHistory(assign() As String, slots() As String, _
         End If
     Next r
 
-    ' 再計算後の最終行を取得
     lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
     If lastRow < ROW_HIST_START - 1 Then lastRow = ROW_HIST_START - 1
 
-    ' 追記
     Dim i As Long, writeRow As Long
     For i = 0 To N_SLOTS - 1
         writeRow = lastRow + 1 + i
@@ -676,89 +636,25 @@ Private Sub AppendToHistory(assign() As String, slots() As String, _
 End Sub
 
 ' =============================================================
-' 履歴から過去日を執務表に表示
-'   執務表!B2 にある日付を読み、その日のデータをレンダリング
-' =============================================================
-Public Sub ShowDateFromHistory()
-    On Error GoTo EH
-    Application.ScreenUpdating = False
-
-    Dim wsOut As Worksheet: Set wsOut = ThisWorkbook.Worksheets(SHEET_OUT)
-    Dim dv As Variant: dv = wsOut.Range("B2").Value
-    If Not IsDate(dv) Then
-        MsgBox "執務表シートの B2 に yyyy/m/d 形式の日付を入力してください。", vbExclamation
-        GoTo DONE_EXIT
-    End If
-    Dim targetDate As Date: targetDate = CDate(dv)
-
-    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_HISTORY)
-    Dim lastRow As Long
-    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
-    If lastRow < ROW_HIST_START Then
-        MsgBox "履歴が空です。", vbExclamation
-        GoTo DONE_EXIT
-    End If
-
-    ' 出力欄をクリア
-    Dim i As Long
-    For i = 0 To N_SLOTS - 1
-        wsOut.Cells(ROW_SLOT_START + i, 2).Value = ""
-        wsOut.Cells(ROW_SLOT_START + i, 5).Value = ""
-    Next i
-
-    Dim slotMap As Object: Set slotMap = BuildSlotLabelMap()
-    Dim found As Boolean: found = False
-    Dim r As Long, v As Variant
-    For r = ROW_HIST_START To lastRow
-        v = ws.Cells(r, 1).Value
-        If IsDate(v) Then
-            If CDate(v) = targetDate Then
-                found = True
-                Dim slotLabel As String: slotLabel = Trim(CStr(Nz(ws.Cells(r, 2).Value, "")))
-                If slotMap.Exists(slotLabel) Then
-                    Dim idx As Long: idx = CLng(slotMap(slotLabel))
-                    wsOut.Cells(ROW_SLOT_START + idx, 2).Value = _
-                        Trim(CStr(Nz(ws.Cells(r, 3).Value, "")))
-                    wsOut.Cells(ROW_SLOT_START + idx, 5).Value = _
-                        Trim(CStr(Nz(ws.Cells(r, 4).Value, "")))
-                End If
-            End If
-        End If
-    Next r
-
-    wsOut.Activate
-    If Not found Then
-        MsgBox "指定日付のデータが履歴に見つかりません: " & Format(targetDate, "yyyy/m/d"), vbExclamation
-    End If
-
-DONE_EXIT:
-    Application.ScreenUpdating = True
-    Exit Sub
-EH:
-    Application.ScreenUpdating = True
-    MsgBox "エラー: " & Err.Description, vbCritical
-End Sub
-
-' =============================================================
 ' 検証
 ' =============================================================
 Private Function Validate(assign() As String, roster As Object, _
-    daily As Object, prevDay As Object, slots() As String) As String
+    daily As Object, positions As Object, prevDay As Object, _
+    slots() As String) As String
     Dim msgs As String, i As Long, col As Long
 
-    ' 空欄チェック
     For i = 0 To N_SLOTS - 1
         For col = 0 To 1
             If Len(assign(col, i)) = 0 Then
-                msgs = msgs & " - " & slots(i) & " / " & IIf(col = 0, "通信", "受付") & " が空欄 (割当候補なし)" & vbCrLf
+                msgs = msgs & " - " & slots(i) & " / " & _
+                       IIf(col = 0, "通信", "受付") & " が空欄 (割当候補なし)" & vbCrLf
             End If
         Next col
     Next i
 
-    ' 10-17時 全員カバー
-    Dim k As Variant, covered As Object
-    Set covered = CreateObject("Scripting.Dictionary")
+    Dim covered As Object: Set covered = CreateObject("Scripting.Dictionary")
     covered.CompareMode = vbTextCompare
+    Dim k As Variant
     For Each k In roster.Keys
         covered(CStr(k)) = 0
     Next k
@@ -770,18 +666,17 @@ Private Function Validate(assign() As String, roster As Object, _
         Next col
     Next i
     For Each k In roster.Keys
-        If covered(CStr(k)) = 0 _
-            And Not daily("休暇").Exists(CStr(k)) _
-            And CStr(roster(k)) <> "警防力" Then
+        ' 10-17時 全スロット × の人は警告しない
+        If covered(CStr(k)) = 0 And Not AllBlockedInDaytime(CStr(k), daily, positions) Then
             msgs = msgs & " - " & CStr(k) & " は 10-17時に未勤務" & vbCrLf
         End If
     Next k
 
-    ' 夜20時以降 前日同一人物チェック
     For i = S_20_21 To N_SLOTS - 1
         For col = 0 To 1
             If Len(assign(col, i)) > 0 And assign(col, i) = prevDay(i)(col) Then
-                msgs = msgs & " - " & slots(i) & " / " & IIf(col = 0, "通信", "受付") & _
+                msgs = msgs & " - " & slots(i) & " / " & _
+                       IIf(col = 0, "通信", "受付") & _
                        " が前日と同じ (" & assign(col, i) & ")" & vbCrLf
             End If
         Next col
@@ -790,11 +685,22 @@ Private Function Validate(assign() As String, roster As Object, _
     Validate = msgs
 End Function
 
+Private Function AllBlockedInDaytime(name As String, daily As Object, _
+    positions As Object) As Boolean
+    Dim i As Long
+    For i = S_10_11 To S_17_18 - 1
+        If Not IsBlocked(name, i, daily, positions) Then
+            AllBlockedInDaytime = False
+            Exit Function
+        End If
+    Next i
+    AllBlockedInDaytime = True
+End Function
+
 ' =============================================================
 ' ユーティリティ
 ' =============================================================
 Private Function Nz(v As Variant, alt As Variant) As Variant
-    ' VBA は Or に短絡評価が無いので段階チェック
     If IsNull(v) Then
         Nz = alt
     ElseIf IsEmpty(v) Then
