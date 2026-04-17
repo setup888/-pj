@@ -242,6 +242,13 @@ End Function
 
 Private Function LoadDailyInput(slots() As String) As Object
     ' 当日チェックシートを読む
+    ' 新レイアウト (1人 1行):
+    '   A: No, B: 氏名,
+    '   C: 休暇 (○), D: 当直 (○), E: 食当 (○),
+    '   F: ポジション1, G: ポジション2,
+    '   H: 除外1開始, I: 除外1終了,
+    '   J: 除外2開始, K: 除外2終了,
+    '   L: 備考
     Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
     d.CompareMode = vbTextCompare
     Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_INPUT)
@@ -249,6 +256,7 @@ Private Function LoadDailyInput(slots() As String) As Object
     d("当番日") = ws.Range("B3").Value
     d("休日") = CLng(Nz(ws.Range("B4").Value, 0))
 
+    ' name -> Collection of position names (複数対応)
     Dim posByName As Object: Set posByName = CreateObject("Scripting.Dictionary")
     posByName.CompareMode = vbTextCompare
     Dim exclByName As Object: Set exclByName = CreateObject("Scripting.Dictionary")
@@ -262,16 +270,30 @@ Private Function LoadDailyInput(slots() As String) As Object
         name = Trim(CStr(Nz(ws.Cells(r, 2).Value, "")))
         If Len(name) = 0 Then GoTo NEXT_R
 
-        Dim pos As String
-        pos = Trim(CStr(Nz(ws.Cells(r, 3).Value, "")))
-        If Len(pos) > 0 Then posByName(name) = pos
+        Dim posList As Collection: Set posList = New Collection
 
-        ' 除外1-3 (列 D..I = 4..9) の3セット
+        ' チェックボックス3列 → 対応ポジションを付与
+        If IsChecked(ws.Cells(r, 3).Value) Then posList.Add "休暇"
+        If IsChecked(ws.Cells(r, 4).Value) Then posList.Add "当直"
+        If IsChecked(ws.Cells(r, 5).Value) Then posList.Add "食当"
+
+        ' ポジション1/2
+        Dim p1 As String, p2 As String
+        p1 = Trim(CStr(Nz(ws.Cells(r, 6).Value, "")))
+        p2 = Trim(CStr(Nz(ws.Cells(r, 7).Value, "")))
+        If Len(p1) > 0 Then posList.Add p1
+        If Len(p2) > 0 Then posList.Add p2
+
+        If posList.Count > 0 Then
+            Set posByName(name) = posList
+        End If
+
+        ' 除外1/2 (列 H..K = 8..11)
         Dim k As Long, coll As Collection
         Set coll = Nothing
-        For k = 0 To 2
+        For k = 0 To 1
             Dim sCol As Long, eCol As Long
-            sCol = 4 + k * 2
+            sCol = 8 + k * 2
             eCol = sCol + 1
             Dim sLbl As String, eLbl As String
             sLbl = Trim(CStr(Nz(ws.Cells(r, sCol).Value, "")))
@@ -284,7 +306,6 @@ Private Function LoadDailyInput(slots() As String) As Object
                 sIdx = CLng(slotMap(sLbl))
                 eIdx = CLng(slotMap(eLbl))
                 If eIdx < sIdx Then
-                    ' 終了<開始 なら範囲逆なので入れ替え
                     Dim tmp As Long: tmp = sIdx: sIdx = eIdx: eIdx = tmp
                 End If
                 coll.Add Array(sIdx, eIdx)
@@ -299,6 +320,11 @@ NEXT_R:
     Set d("ポジション") = posByName
     Set d("除外") = exclByName
     Set LoadDailyInput = d
+End Function
+
+Private Function IsChecked(v As Variant) As Boolean
+    If IsNull(v) Or IsEmpty(v) Then IsChecked = False: Exit Function
+    IsChecked = (Len(Trim(CStr(v))) > 0)
 End Function
 
 Private Function LoadPrevDayFromHistory(beforeDate As Date, slots() As String) As Object
@@ -389,15 +415,19 @@ End Function
 ' =============================================================
 Private Function IsBlocked(name As String, slotIdx As Long, _
     daily As Object, positions As Object) As Boolean
-    ' 1) ポジションのマトリクス × をチェック
+    ' 1) 全ポジション (チェックボックス + ポジション1/2) の × を合算判定
     If daily("ポジション").Exists(name) Then
-        Dim pos As String: pos = CStr(daily("ポジション")(name))
-        If positions.Exists(pos) Then
-            If positions(pos).Exists(slotIdx) Then
-                IsBlocked = True
-                Exit Function
+        Dim posList As Collection: Set posList = daily("ポジション")(name)
+        Dim pos As Variant
+        For Each pos In posList
+            Dim posName As String: posName = CStr(pos)
+            If positions.Exists(posName) Then
+                If positions(posName).Exists(slotIdx) Then
+                    IsBlocked = True
+                    Exit Function
+                End If
             End If
-        End If
+        Next pos
     End If
 
     ' 2) 追加除外時間帯

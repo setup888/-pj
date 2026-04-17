@@ -37,6 +37,8 @@ POSITIONS_INITIAL = [
     "救助隊",
     "はしご隊",
     "救急隊",
+    "日中救急",
+    "夜救急",
     "伝令",
     "通信担当",
     "情報担当",
@@ -45,8 +47,8 @@ POSITIONS_INITIAL = [
     "残留",
     "署隊本部支援員",
     "その他",
-    # 以下は duty (時間帯制限あり)
-    "当直士長",
+    # 以下はチェックボックス連動 (当日チェックのチェックで自動適用)
+    "当直",
     "食当",
     "休暇",
     "研修/出向",
@@ -58,7 +60,14 @@ POSITION_DEFAULT_BLOCKS = {
     "休暇": set(TIME_SLOTS),
     "研修/出向": set(TIME_SLOTS),
     "食当": {"14〜15", "15〜16", "16〜17"},
-    "当直士長": {"18〜19", "19〜20", "6〜7", "7〜8"},
+    "当直": {"18〜19", "19〜20", "6〜7", "7〜8"},
+    # 日中救急: 8:40-18 (slot 0..9)
+    "日中救急": {"8:40〜9", "9〜10", "10〜11", "11〜12", "12〜13",
+               "13〜14", "14〜15", "15〜16", "16〜17", "17〜18"},
+    # 夜救急: 18-翌8:40 (slot 10..24)
+    "夜救急": {"18〜19", "19〜20", "20〜21", "21〜22", "22〜23",
+             "23〜24", "0〜1", "1〜2", "2〜3", "3〜4", "4〜5", "5〜6",
+             "6〜7", "7〜8", "8〜8:40"},
 }
 
 # セルスタイル
@@ -189,24 +198,30 @@ def build_daily_input(ws):
     ws["A4"].border = BORDER_ALL
     ws["B4"] = 0
     style_input(ws["B4"])
-    ws["C4"] = "※ このシートで各隊員の『今日のポジション』を選び、必要なら除外時間帯を追加"
+    ws["C4"] = "※ チェック列は ○ を入れるだけ (ドロップダウン使用可)。ポジション列は複数個の重複割当に対応。"
     ws["C4"].font = Font(italic=True, size=9)
-    ws.merge_cells("C4:J4")
+    ws.merge_cells("C4:L4")
 
     # マトリクスヘッダ (行6)
     headers = [
-        "No", "氏名", "今日のポジション",
+        "No", "氏名",
+        "休暇", "当直", "食当",
+        "ポジション1", "ポジション2",
         "除外1 開始", "除外1 終了",
         "除外2 開始", "除外2 終了",
-        "除外3 開始", "除外3 終了",
         "備考",
     ]
     for i, h in enumerate(headers, start=1):
-        style_header(ws.cell(row=6, column=i, value=h))
+        c = ws.cell(row=6, column=i, value=h)
+        style_header(c)
+        c.font = Font(bold=True, size=11)
 
     N = 30
+    # データ行 (高さを上げて大きく、クリックしやすく)
+    ws.row_dimensions[6].height = 28
     for i in range(N):
         r = 7 + i
+        ws.row_dimensions[r].height = 26
         roster_row = 2 + i
         # No
         ws.cell(row=r, column=1, value=i + 1).alignment = ALIGN_CENTER
@@ -216,33 +231,57 @@ def build_daily_input(ws):
                      value=f'=IF(名簿!B{roster_row}="","",名簿!B{roster_row})')
         nm.border = BORDER_ALL
         nm.alignment = ALIGN_LEFT
-        # ポジション + 除外列
-        for c in range(3, 11):
+        # チェックボックス3列 (C=休暇, D=当直, E=食当)
+        for c in (3, 4, 5):
             cell = ws.cell(row=r, column=c)
             cell.border = BORDER_ALL
             cell.alignment = ALIGN_CENTER
-            if c < 10:
-                cell.fill = FILL_INPUT
+            cell.fill = PatternFill("solid", fgColor="FFFACD")  # 薄い黄色で目立たせる
+            cell.font = Font(size=16, bold=True)  # 大きな文字
+        # ポジション1/2
+        for c in (6, 7):
+            cell = ws.cell(row=r, column=c)
+            cell.border = BORDER_ALL
+            cell.alignment = ALIGN_CENTER
+            cell.fill = FILL_INPUT
+        # 除外1/2 (開始・終了)
+        for c in (8, 9, 10, 11):
+            cell = ws.cell(row=r, column=c)
+            cell.border = BORDER_ALL
+            cell.alignment = ALIGN_CENTER
+            cell.fill = FILL_INPUT
+        # 備考
+        ws.cell(row=r, column=12).border = BORDER_ALL
 
-    # ドロップダウン: ポジション (ポジション定義 A5:A54)
+    # チェックボックス列 ドロップダウン (○)
+    dv_check = DataValidation(type="list", formula1='"○"', allow_blank=True)
+    ws.add_data_validation(dv_check)
+    dv_check.add(f"C7:E{6 + N}")
+
+    # ポジション ドロップダウン
     dv_pos = DataValidation(type="list",
                             formula1="=ポジション定義!$A$5:$A$54",
                             allow_blank=True)
     ws.add_data_validation(dv_pos)
-    dv_pos.add(f"C7:C{6 + N}")
+    dv_pos.add(f"F7:G{6 + N}")
 
-    # ドロップダウン: 時間帯 (除外1-3 開始/終了)
+    # 除外時間帯 ドロップダウン
     slot_list = ",".join(TIME_SLOTS)
     dv_slot = DataValidation(type="list", formula1=f'"{slot_list}"', allow_blank=True)
     ws.add_data_validation(dv_slot)
-    dv_slot.add(f"D7:I{6 + N}")
+    dv_slot.add(f"H7:K{6 + N}")
 
     ws.column_dimensions["A"].width = 5
     ws.column_dimensions["B"].width = 16
-    ws.column_dimensions["C"].width = 16
-    for c in "DEFGHI":
+    # チェックボックス列は大きめ
+    ws.column_dimensions["C"].width = 8
+    ws.column_dimensions["D"].width = 8
+    ws.column_dimensions["E"].width = 8
+    ws.column_dimensions["F"].width = 14
+    ws.column_dimensions["G"].width = 14
+    for c in "HIJK":
         ws.column_dimensions[c].width = 10
-    ws.column_dimensions["J"].width = 22
+    ws.column_dimensions["L"].width = 22
 
     ws.freeze_panes = "C7"
 
@@ -370,8 +409,10 @@ def build_help(ws):
         "◆ 毎当番の作業",
         " 1. 当日チェックシート",
         "    - B3 当番日を更新",
-        "    - 各隊員の「今日のポジション」をドロップダウンから選択",
-        "    - 半日不在等あれば 除外1〜3 の時間帯を入れる",
+        "    - 休暇/当直/食当 列は ○ チェックを入れるだけ (複数可)",
+        "    - ポジション1/2 に 警防態勢のポジションをドロップダウンから選ぶ",
+        "      (複数の隊に兼務の場合は 2つ選ぶ、例: 日中救急+残留)",
+        "    - 半日不在等の臨時は 除外1/2 の時間帯を入れる",
         " 2. 執務表シート「本日を生成」ボタン",
         " 3. 印刷 or Word様式にコピペ",
         "",
@@ -383,9 +424,19 @@ def build_help(ws):
         " - VBAの書き換え不要",
         "",
         "◆ よく使うポジション (初期登録済み)",
-        " ポンプ隊 / 救助隊 / はしご隊 / 救急隊 / 伝令 / 通信担当 / 情報担当 /",
-        " 情報員 / 署隊長伝令 / 残留 / 署隊本部支援員 / その他",
-        " 当直士長 / 食当 / 休暇 / 研修・出向",
+        " ポンプ隊 / 救助隊 / はしご隊 / 救急隊 / 日中救急 / 夜救急 /",
+        " 伝令 / 通信担当 / 情報担当 / 情報員 / 署隊長伝令 / 残留 /",
+        " 署隊本部支援員 / その他 / 当直 / 食当 / 休暇 / 研修・出向",
+        "",
+        "◆ チェックボックスの仕組み",
+        " - 休暇/当直/食当 は利用頻度が高いので別列チェック",
+        " - チェック = それぞれの「ポジション」を自動的にこの人に付与",
+        " - ポジション定義シートで × 時間帯を変えれば 挙動も変わる",
+        "",
+        "◆ 複数ポジション",
+        " - 1人が複数のポジションに該当する場合は ポジション1/2 で両方選ぶ",
+        "   例: 救急出動者 18時で残留交代 → 日中救急 + 残留",
+        " - VBAは全ポジションの × を合算してブロック判定",
         "",
         "◆ 新ポジション追加",
         " - ポジション定義シートに行追加 → 時間帯に × を入れる",
