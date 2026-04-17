@@ -82,9 +82,14 @@ Public Sub GenerateShift()
     For k = 0 To UBound(slotOrder)
         slotIdx = slotOrder(k)
         For col = 0 To 1
-            assign(col, slotIdx) = PickAssignee( _
-                col, slotIdx, members, roster, daily, positions, _
-                prevDay, assign, workCount)
+            ' 受付 8:40〜9 は斜線 (誰も割当しない)
+            If col = 1 And slotIdx = 0 Then
+                assign(1, 0) = ""   ' 空欄維持
+            Else
+                assign(col, slotIdx) = PickAssignee( _
+                    col, slotIdx, members, roster, daily, positions, _
+                    prevDay, assign, workCount)
+            End If
         Next col
     Next k
 
@@ -200,18 +205,31 @@ Private Function BuildSlotLabelMap(slots() As String) As Object
 End Function
 
 Private Function LoadRoster() As Object
-    ' 氏名の一覧 (名簿シート B2:B31)
+    ' 氏名 + 階級 (名簿シート B2:C31)
+    ' 戻り値: name -> rank_string
     Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
     d.CompareMode = vbTextCompare
     Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_ROSTER)
-    Dim r As Long, name As String
+    Dim r As Long, name As String, rank As String
     For r = 2 To 31
         name = Trim(CStr(Nz(ws.Cells(r, 2).Value, "")))
+        rank = Trim(CStr(Nz(ws.Cells(r, 3).Value, "")))
         If Len(name) > 0 And Left(name, 1) <> "例" Then
-            d(name) = True
+            d(name) = rank
         End If
     Next r
     Set LoadRoster = d
+End Function
+
+Private Function RankValue(rank As String) As Long
+    ' 高いほど上級。通信優先の数値。
+    Select Case rank
+        Case "司令補": RankValue = 4
+        Case "士長": RankValue = 3
+        Case "副士長": RankValue = 2
+        Case "消防士": RankValue = 1
+        Case Else: RankValue = 0   ' 未設定
+    End Select
 End Function
 
 Private Function LoadPositions(slots() As String) As Object
@@ -513,7 +531,7 @@ SKIP_ADD:
     Dim c As Variant
     For Each c In candidates
         Dim s As Double
-        s = ScoreCandidate(CStr(c), col, slotIdx, prevDay, assign, workCount)
+        s = ScoreCandidate(CStr(c), col, slotIdx, prevDay, assign, workCount, roster)
         If s < bestScore Then
             bestScore = s
             bestName = CStr(c)
@@ -527,11 +545,33 @@ SKIP_ADD:
 End Function
 
 Private Function ScoreCandidate(name As String, col As Long, slotIdx As Long, _
-    prevDay As Object, assign() As String, workCount As Object) As Double
+    prevDay As Object, assign() As String, workCount As Object, _
+    roster As Object) As Double
     Dim score As Double: score = 0
 
     ' (a) 総勤務回数 (バランス)
     score = score + CDbl(workCount(name)) * 10
+
+    ' (a2) 階級による 通信/受付 優先度
+    '   司令補/士長 → 通信優先、副士長/消防士 → 受付優先
+    '   消防士は電話対応が難しいので 通信 に大きなペナルティ
+    Dim rank As String: rank = CStr(roster(name))
+    Dim rv As Long: rv = RankValue(rank)
+    If col = 0 Then  ' 通信
+        Select Case rv
+            Case 4: score = score - 30          ' 司令補: 通信優先
+            Case 3: score = score - 30          ' 士長:   通信優先
+            Case 2: score = score + 30          ' 副士長: やや受付寄り
+            Case 1: score = score + 300         ' 消防士: 通信は原則×
+        End Select
+    Else             ' 受付
+        Select Case rv
+            Case 4: score = score + 20          ' 司令補: やや通信寄り
+            Case 3: score = score + 20          ' 士長:   やや通信寄り
+            Case 2: score = score - 30          ' 副士長: 受付優先
+            Case 1: score = score - 30          ' 消防士: 受付優先
+        End Select
+    End If
 
     ' (b) 前日同時刻と同一人物
     Dim prevName As String: prevName = prevDay(slotIdx)(col)
@@ -712,10 +752,13 @@ Private Function Validate(assign() As String, roster As Object, _
 
     For i = 0 To N_SLOTS - 1
         For col = 0 To 1
+            ' 受付 8:40〜9 は斜線なので空欄チェックから除外
+            If col = 1 And i = 0 Then GoTo NEXT_CHECK
             If Len(assign(col, i)) = 0 Then
                 msgs = msgs & " - " & slots(i) & " / " & _
                        IIf(col = 0, "通信", "受付") & " が空欄 (割当候補なし)" & vbCrLf
             End If
+NEXT_CHECK:
         Next col
     Next i
 

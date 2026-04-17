@@ -133,11 +133,13 @@ def style_output(cell):
 
 
 # =============================================================
-# 名簿 (氏名のみ)
+# 名簿 (氏名 + 階級)
 # =============================================================
+RANKS = ["司令補", "士長", "副士長", "消防士"]  # 高→低
+
 def build_roster(ws):
     ws.title = "名簿"
-    headers = ["No", "氏名"]
+    headers = ["No", "氏名", "階級"]
     for i, h in enumerate(headers, start=1):
         style_header(ws.cell(row=1, column=i, value=h))
     N = 30
@@ -145,18 +147,32 @@ def build_roster(ws):
         r = 2 + i
         ws.cell(row=r, column=1, value=i + 1).alignment = ALIGN_CENTER
         ws.cell(row=r, column=1).border = BORDER_ALL
-        cell = ws.cell(row=r, column=2)
-        cell.border = BORDER_ALL
-        cell.fill = FILL_INPUT
-        cell.alignment = ALIGN_LEFT
+        for c in (2, 3):
+            cell = ws.cell(row=r, column=c)
+            cell.border = BORDER_ALL
+            cell.fill = FILL_INPUT
+            cell.alignment = ALIGN_LEFT if c == 2 else ALIGN_CENTER
+
+    # 階級ドロップダウン
+    dv_rank = DataValidation(type="list",
+                             formula1='"' + ",".join(RANKS) + '"',
+                             allow_blank=True)
+    ws.add_data_validation(dv_rank)
+    dv_rank.add(f"C2:C{1 + N}")
 
     ws.column_dimensions["A"].width = 5
     ws.column_dimensions["B"].width = 22
+    ws.column_dimensions["C"].width = 10
 
-    # サンプル
-    samples = ["例: 原田 陽一郎", "例: 梅村 侑志", "例: 鍋谷 昇"]
-    for i, name in enumerate(samples):
+    samples = [
+        ("例: 原田 陽一郎", "司令補"),
+        ("例: 梅村 侑志", "士長"),
+        ("例: 鍋谷 昇", "副士長"),
+        ("例: 中村 太一", "消防士"),
+    ]
+    for i, (name, rank) in enumerate(samples):
         ws.cell(row=2 + i, column=2, value=name)
+        ws.cell(row=2 + i, column=3, value=rank)
 
 
 # =============================================================
@@ -391,6 +407,15 @@ def build_output(ws):
             style_output(ws.cell(row=i, column=col))
         for col in (3, 4, 6, 7):
             ws.cell(row=i, column=col).border = BORDER_ALL
+
+    # 受付 8:40〜9 (E5) は斜線 (誰も割り当てない)
+    diag_border = Border(
+        left=thin, right=thin, top=thin, bottom=thin,
+        diagonal=Side(style="thin", color="000000"),
+        diagonalDown=True,
+    )
+    ws["E5"].border = diag_border
+    ws["E5"].value = ""
 
     last = 5 + N_SLOTS
     ws.cell(row=last, column=1, value="二次指定者").font = FONT_BOLD

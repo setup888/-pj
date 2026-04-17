@@ -73,11 +73,14 @@ POSITIONS: Dict[str, set] = {
 }
 
 
+RANK_VALUE = {"司令補": 4, "士長": 3, "副士長": 2, "消防士": 1}
+
+
 @dataclass
 class DailyInput:
     date: date
     休日: int = 0
-    positions: Dict[str, List[str]] = field(default_factory=dict)   # name -> [positions]
+    positions: Dict[str, List[str]] = field(default_factory=dict)
     exclusions: Dict[str, List[Tuple[int, int]]] = field(default_factory=dict)
 
 
@@ -113,8 +116,19 @@ def late_count(name, assign, cur):
     return cnt
 
 
-def score(name, col, slot, prev_day, assign, work_count):
+def score(name, col, slot, prev_day, assign, work_count, roster):
     s = work_count.get(name, 0) * 10
+
+    # 階級による 通信/受付 優先
+    rv = RANK_VALUE.get(roster.get(name, ""), 0)
+    if col == 0:  # 通信
+        if rv == 4 or rv == 3: s -= 30
+        elif rv == 2: s += 30
+        elif rv == 1: s += 300
+    else:         # 受付
+        if rv == 4 or rv == 3: s += 20
+        elif rv == 2 or rv == 1: s -= 30
+
     prev_name = prev_day.get(slot, ("", ""))[col]
     if prev_name and prev_name == name:
         s += 1000 if slot >= S_20_21 else 50
@@ -134,14 +148,14 @@ def score(name, col, slot, prev_day, assign, work_count):
     return s
 
 
-def pick(col, slot, members, daily, prev_day, assign, work_count):
+def pick(col, slot, members, daily, prev_day, assign, work_count, roster):
     cands = [n for n in members if not is_blocked(n, slot, daily)]
     if col == 1:
         cands = [n for n in cands if assign[0][slot] != n]
     if not cands: return ""
     best_n, best_s = "", float("inf")
     for n in cands:
-        sc = score(n, col, slot, prev_day, assign, work_count)
+        sc = score(n, col, slot, prev_day, assign, work_count, roster)
         if sc < best_s:
             best_s, best_n = sc, n
     if best_n:
@@ -165,7 +179,11 @@ def generate(roster, daily, prev_day):
     work_count = {m: 0 for m in members}
     for slot in slot_order():
         for col in (0, 1):
-            assign[col][slot] = pick(col, slot, members, daily, prev_day, assign, work_count)
+            if col == 1 and slot == 0:
+                assign[1][0] = ""   # 受付 8:40〜9 は斜線
+                continue
+            assign[col][slot] = pick(col, slot, members, daily, prev_day,
+                                     assign, work_count, roster)
     # 12/17 distinct
     for col in (0, 1):
         if assign[col][S_12_13] and assign[col][S_12_13] == assign[col][S_17_18]:
@@ -182,6 +200,8 @@ def validate(assign, roster, daily, prev_day):
     msgs = []
     for i in range(N):
         for col in (0, 1):
+            if col == 1 and i == 0:
+                continue  # 受付 8:40〜9 は斜線
             if not assign[col][i]:
                 msgs.append(f"{TIME_SLOTS[i]}/{'通信' if col == 0 else '受付'} 空欄")
     covered = defaultdict(int)
@@ -207,12 +227,26 @@ def print_assign(assign, header=""):
 
 
 def main():
-    roster = [
-        "原田 陽一郎", "梅村 侑志", "小西 隼人", "鍋谷 昇", "村山 哲也",
-        "長田 智紀", "和田 浩司", "長友 亮澄", "尾坂 友梨", "山川 敦史",
-        "金子 卓磨", "永井 恵理", "中村 太一", "藤井 惇平", "伊藤 祥輝",
-        "飯塚 佑介", "後藤 直人",
-    ]
+    # 名簿: 氏名 -> 階級
+    roster = {
+        "原田 陽一郎": "司令補",
+        "梅村 侑志": "司令補",
+        "小西 隼人": "士長",
+        "鍋谷 昇": "士長",
+        "村山 哲也": "士長",
+        "長田 智紀": "士長",
+        "和田 浩司": "副士長",
+        "長友 亮澄": "副士長",
+        "尾坂 友梨": "副士長",
+        "山川 敦史": "副士長",
+        "金子 卓磨": "副士長",
+        "永井 恵理": "副士長",
+        "中村 太一": "消防士",
+        "藤井 惇平": "消防士",
+        "伊藤 祥輝": "消防士",
+        "飯塚 佑介": "消防士",
+        "後藤 直人": "消防士",
+    }
 
     # 1日目 ポジション配置 (警防態勢) - 複数ポジション対応
     daily1 = DailyInput(
