@@ -76,20 +76,36 @@ Public Sub GenerateShift()
         workCount(CStr(members(i))) = 0
     Next i
 
-    ' 処理順: 10-17 → 17-24 → 0-8 → 8-8:40 → 8:40-10
+    ' Phase A: 固定枠配置
+    '   - 通信 slot 0, 1 = 残留ポジションの人
+    '   - 受付 slot 1, 24 = 署隊長伝令ポジションの人
+    '   - 通信 slot 2 = 伝令 or 通信担当
+    '   - 受付 slot 2 = 伝令 or 通信担当 (もう一人)
+    Call ApplyFixedSlots(assign, members, roster, daily, positions, workCount)
+
+    ' Phase B: 深夜スライド (slot 14..20 = 22時〜5時)
+    '   前日 slot+1 の人を今日 slot に入れる
+    Call ApplyNightSlide(assign, members, roster, daily, positions, _
+                        prevDay, workCount)
+
+    ' Phase C: 残りのスロットをスコアリングで埋める
     Dim slotOrder() As Long: slotOrder = BuildSlotProcessOrder()
     Dim k As Long, slotIdx As Long, col As Long
     For k = 0 To UBound(slotOrder)
         slotIdx = slotOrder(k)
         For col = 0 To 1
-            ' 受付 8:40〜9 は斜線 (誰も割当しない)
+            ' 受付 8:40〜9 は斜線
             If col = 1 And slotIdx = 0 Then
-                assign(1, 0) = ""   ' 空欄維持
-            Else
-                assign(col, slotIdx) = PickAssignee( _
-                    col, slotIdx, members, roster, daily, positions, _
-                    prevDay, assign, workCount)
+                assign(1, 0) = ""
+                GoTo NEXT_SLOT
             End If
+            ' 既に固定枠 or 深夜スライドで埋まっていればスキップ
+            If Len(assign(col, slotIdx)) > 0 Then GoTo NEXT_SLOT
+
+            assign(col, slotIdx) = PickAssignee( _
+                col, slotIdx, members, roster, daily, positions, _
+                prevDay, assign, workCount)
+NEXT_SLOT:
         Next col
     Next k
 
@@ -324,8 +340,12 @@ Private Function RankValue(rank As String) As Long
 End Function
 
 Private Function LoadPositions(slots() As String) As Object
-    ' ポジション定義シートを読む
-    ' 戻り値: position_name -> Dictionary(slotIdx -> True) のブロックセット
+    ' ポジション定義シートを読む (新レイアウト)
+    ' A: ポジション名, B: 通信可(○), C: 受付可(○), D..AB: 時間帯25列 (×)
+    ' 戻り値は Dictionary:
+    '   "<name>" -> Scripting.Dictionary(slotIdx -> True) ブロックセット
+    '   "<name>:comm" -> Boolean (通信に入れるか)
+    '   "<name>:recv" -> Boolean (受付に入れるか)
     Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
     d.CompareMode = vbTextCompare
     Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(SHEET_POS)
@@ -333,31 +353,54 @@ Private Function LoadPositions(slots() As String) As Object
     Dim r As Long, posName As String
     For r = ROW_POS_START To ROW_POS_END
         posName = Trim(CStr(Nz(ws.Cells(r, 1).Value, "")))
-        If Len(posName) > 0 Then
+        ' セパレータ (「↓ 以下は〜」等) はスキップ
+        If Len(posName) > 0 And Left(posName, 1) <> "↓" And InStr(posName, "以下は") = 0 Then
             Dim blocks As Object: Set blocks = CreateObject("Scripting.Dictionary")
+            Dim commFlag As String, recvFlag As String
+            commFlag = Trim(CStr(Nz(ws.Cells(r, 2).Value, "")))
+            recvFlag = Trim(CStr(Nz(ws.Cells(r, 3).Value, "")))
+
             Dim j As Long
             For j = 0 To N_SLOTS - 1
                 Dim cellVal As String
-                cellVal = Trim(CStr(Nz(ws.Cells(r, 2 + j).Value, "")))
+                cellVal = Trim(CStr(Nz(ws.Cells(r, 4 + j).Value, "")))
                 If InStr(cellVal, "×") > 0 Or LCase(cellVal) = "x" Then
                     blocks(j) = True
                 End If
             Next j
             Set d(posName) = blocks
+
+            ' カラム専属判定:
+            '   両方空 or 両方○ → 両方OK
+            '   通信可のみ○ → 通信専属
+            '   受付可のみ○ → 受付専属
+            Dim hasComm As Boolean, hasRecv As Boolean
+            hasComm = (Len(commFlag) > 0)
+            hasRecv = (Len(recvFlag) > 0)
+            If hasComm And Not hasRecv Then
+                d(posName & ":comm") = True
+                d(posName & ":recv") = False
+            ElseIf hasRecv And Not hasComm Then
+                d(posName & ":comm") = False
+                d(posName & ":recv") = True
+            Else
+                ' 両方指定 or 両方空 → 両方OK
+                d(posName & ":comm") = True
+                d(posName & ":recv") = True
+            End If
         End If
     Next r
     Set LoadPositions = d
 End Function
 
 Private Function LoadDailyInput(slots() As String) As Object
-    ' 当日チェックシートを読む
-    ' レイアウト (1人 1行):
-    '   A: No, B: 氏名,
-    '   C: 休暇 (○), D: 当直 (○), E: 食当 (○),
-    '   F: ポジション1, G: ポジション2,
-    '   H: 除外1 から(時刻), I: 除外1 まで(時刻),
-    '   J: 除外2 から, K: 除外2 まで,
-    '   L: 備考
+    ' 当日チェックシートを読む (新レイアウト)
+    '   A: No, B: 氏名
+    '   C: 休暇, D: 当直, E: 食当, F: 研修, G: 警防力  (チェックボックス5個)
+    '   H: ポジション1, I: ポジション2  (隊役割のみ)
+    '   J: 除外1 から, K: 除外1 まで
+    '   L: 除外2 から, M: 除外2 まで
+    '   N: 備考
     ' 除外時間帯は時刻境界で指定 (例: 9時 から 17時 = slot 1〜8 ブロック)
     Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
     d.CompareMode = vbTextCompare
@@ -381,15 +424,17 @@ Private Function LoadDailyInput(slots() As String) As Object
 
         Dim posList As Collection: Set posList = New Collection
 
-        ' チェックボックス3列 → 対応ポジションを付与
+        ' チェックボックス5列 (C..G) → 対応ポジションを付与
         If IsChecked(ws.Cells(r, 3).Value) Then posList.Add "休暇"
         If IsChecked(ws.Cells(r, 4).Value) Then posList.Add "当直"
         If IsChecked(ws.Cells(r, 5).Value) Then posList.Add "食当"
+        If IsChecked(ws.Cells(r, 6).Value) Then posList.Add "研修/出向"
+        If IsChecked(ws.Cells(r, 7).Value) Then posList.Add "警防力"
 
-        ' ポジション1/2
+        ' ポジション1/2 (H=8, I=9)
         Dim p1 As String, p2 As String
-        p1 = Trim(CStr(Nz(ws.Cells(r, 6).Value, "")))
-        p2 = Trim(CStr(Nz(ws.Cells(r, 7).Value, "")))
+        p1 = Trim(CStr(Nz(ws.Cells(r, 8).Value, "")))
+        p2 = Trim(CStr(Nz(ws.Cells(r, 9).Value, "")))
         If Len(p1) > 0 Then posList.Add p1
         If Len(p2) > 0 Then posList.Add p2
 
@@ -397,12 +442,12 @@ Private Function LoadDailyInput(slots() As String) As Object
             Set posByName(name) = posList
         End If
 
-        ' 除外1/2: 時刻境界→スロット範囲変換
+        ' 除外1/2: J=10, K=11, L=12, M=13 (時刻境界→スロット範囲変換)
         Dim k As Long, coll As Collection
         Set coll = Nothing
         For k = 0 To 1
             Dim sCol As Long, eCol As Long
-            sCol = 8 + k * 2
+            sCol = 10 + k * 2
             eCol = sCol + 1
             Dim sLbl As String, eLbl As String
             sLbl = Trim(CStr(Nz(ws.Cells(r, sCol).Value, "")))
@@ -524,14 +569,17 @@ Private Function AvailableMembers(roster As Object, daily As Object, _
     Dim col As Collection: Set col = New Collection
     Dim k As Variant
     For Each k In roster.Keys
-        ' 全スロット × でなければ追加
+        ' 通信 or 受付 のどこか1スロットでも入れるなら対象
         Dim hasAny As Boolean: hasAny = False
-        Dim i As Long
+        Dim i As Long, c As Long
         For i = 0 To N_SLOTS - 1
-            If Not IsBlocked(CStr(k), i, daily, positions) Then
-                hasAny = True
-                Exit For
-            End If
+            For c = 0 To 1
+                If Not IsBlocked(CStr(k), i, daily, positions, c) Then
+                    hasAny = True
+                    Exit For
+                End If
+            Next c
+            If hasAny Then Exit For
         Next i
         If hasAny Then col.Add CStr(k)
     Next k
@@ -558,13 +606,22 @@ End Function
 
 ' =============================================================
 ' ブロック判定
+'   col = -1: カラム非依存 (ポジションの時間ブロックと除外のみ)
+'   col = 0 (通信) / 1 (受付): 専属カラム判定も行う
 ' =============================================================
 Private Function IsBlocked(name As String, slotIdx As Long, _
-    daily As Object, positions As Object) As Boolean
-    ' 1) 全ポジション (チェックボックス + ポジション1/2) の × を合算判定
+    daily As Object, positions As Object, _
+    Optional col As Long = -1) As Boolean
+
+    ' 1) 全ポジションの × を合算判定
+    Dim hasCommAllow As Boolean, hasRecvAllow As Boolean
+    hasCommAllow = True
+    hasRecvAllow = True
+
     If daily("ポジション").Exists(name) Then
         Dim posList As Collection: Set posList = daily("ポジション")(name)
         Dim pos As Variant
+        ' まず時間ブロックチェック
         For Each pos In posList
             Dim posName As String: posName = CStr(pos)
             If positions.Exists(posName) Then
@@ -574,9 +631,31 @@ Private Function IsBlocked(name As String, slotIdx As Long, _
                 End If
             End If
         Next pos
+
+        ' カラム専属: ポジションの中に 通信専属 / 受付専属 があれば絞る
+        ' 複数ポジション持ってる場合は AND (全部許可してる方のみ可)
+        For Each pos In posList
+            Dim pn As String: pn = CStr(pos)
+            If positions.Exists(pn & ":comm") Then
+                If Not CBool(positions(pn & ":comm")) Then hasCommAllow = False
+            End If
+            If positions.Exists(pn & ":recv") Then
+                If Not CBool(positions(pn & ":recv")) Then hasRecvAllow = False
+            End If
+        Next pos
     End If
 
-    ' 2) 追加除外時間帯
+    ' 2) カラム専属違反チェック
+    If col = 0 And Not hasCommAllow Then
+        IsBlocked = True
+        Exit Function
+    End If
+    If col = 1 And Not hasRecvAllow Then
+        IsBlocked = True
+        Exit Function
+    End If
+
+    ' 3) 追加除外時間帯
     If daily("除外").Exists(name) Then
         Dim coll As Collection: Set coll = daily("除外")(name)
         Dim it As Variant
@@ -603,7 +682,7 @@ Private Function PickAssignee(col As Long, slotIdx As Long, _
     Dim i As Long, name As String
     For i = LBound(members) To UBound(members)
         name = CStr(members(i))
-        If Not IsBlocked(name, slotIdx, daily, positions) Then
+        If Not IsBlocked(name, slotIdx, daily, positions, col) Then
             If col = 1 Then
                 If assign(0, slotIdx) = name Then GoTo SKIP_ADD
             End If
@@ -702,13 +781,24 @@ Private Function ScoreCandidate(name As String, col As Long, slotIdx As Long, _
         If assign(col, S_17_18) = name Then score = score + 500
     End If
 
-    ' (i) 連続割当ペナルティ (時間軸上の前後どちらかが同一人物なら避ける)
-    If slotIdx > 0 Then
-        If assign(col, slotIdx - 1) = name Then score = score + 50
-    End If
-    If slotIdx < N_SLOTS - 1 Then
-        If assign(col, slotIdx + 1) = name Then score = score + 50
-    End If
+    ' (i) 近接ペナルティ (±4 スロット以内で同一人物は重く回避)
+    '   ±1: +200, ±2: +100, ±3: +50, ±4: +30
+    Dim dist As Long
+    For dist = 1 To 4
+        Dim penalty As Double
+        Select Case dist
+            Case 1: penalty = 200
+            Case 2: penalty = 100
+            Case 3: penalty = 50
+            Case 4: penalty = 30
+        End Select
+        If slotIdx - dist >= 0 Then
+            If assign(col, slotIdx - dist) = name Then score = score + penalty
+        End If
+        If slotIdx + dist < N_SLOTS Then
+            If assign(col, slotIdx + dist) = name Then score = score + penalty
+        End If
+    Next dist
 
     ScoreCandidate = score
 End Function
@@ -764,6 +854,121 @@ Private Function BuildSlotProcessOrder() As Long()
 End Function
 
 ' =============================================================
+' Phase A: 固定枠配置
+'   通信 slot 0, 1 = その日の「残留」ポジションの人
+'   受付 slot 1, 24 = その日の「署隊長伝令」ポジションの人
+'   通信 slot 2, 受付 slot 2 = 「伝令」か「通信担当」のペア
+' =============================================================
+Private Sub ApplyFixedSlots(assign() As String, members As Variant, _
+    roster As Object, daily As Object, positions As Object, _
+    workCount As Object)
+
+    ' 残留の人 (通信 slot 0, 1)
+    Dim zanName As String: zanName = FindMemberWithPosition(members, daily, "残留")
+    If Len(zanName) > 0 Then
+        If Not IsBlocked(zanName, 0, daily, positions, 0) Then
+            assign(0, 0) = zanName
+            workCount(zanName) = workCount(zanName) + 1
+        End If
+        If Not IsBlocked(zanName, 1, daily, positions, 0) Then
+            assign(0, 1) = zanName
+            workCount(zanName) = workCount(zanName) + 1
+        End If
+    End If
+
+    ' 署隊長伝令の人 (受付 slot 1, 24)
+    Dim deName As String: deName = FindMemberWithPosition(members, daily, "署隊長伝令")
+    If Len(deName) > 0 Then
+        If Not IsBlocked(deName, 1, daily, positions, 1) Then
+            assign(1, 1) = deName
+            workCount(deName) = workCount(deName) + 1
+        End If
+        If Not IsBlocked(deName, 24, daily, positions, 1) Then
+            assign(1, 24) = deName
+            workCount(deName) = workCount(deName) + 1
+        End If
+    End If
+
+    ' 伝令 or 通信担当 (通信 slot 2, 受付 slot 2)
+    Dim denName As String, tsuName As String
+    denName = FindMemberWithPosition(members, daily, "伝令")
+    tsuName = FindMemberWithPosition(members, daily, "通信担当")
+    ' 通信 slot 2 = 伝令 or 通信担当 を優先
+    If Len(denName) > 0 And Not IsBlocked(denName, S_10_11, daily, positions, 0) Then
+        assign(0, S_10_11) = denName
+        workCount(denName) = workCount(denName) + 1
+    ElseIf Len(tsuName) > 0 And Not IsBlocked(tsuName, S_10_11, daily, positions, 0) Then
+        assign(0, S_10_11) = tsuName
+        workCount(tsuName) = workCount(tsuName) + 1
+    End If
+    ' 受付 slot 2 = もう一人
+    Dim recvCandidate As String
+    If Len(tsuName) > 0 And tsuName <> assign(0, S_10_11) Then
+        recvCandidate = tsuName
+    ElseIf Len(denName) > 0 And denName <> assign(0, S_10_11) Then
+        recvCandidate = denName
+    End If
+    If Len(recvCandidate) > 0 And Not IsBlocked(recvCandidate, S_10_11, daily, positions, 1) Then
+        assign(1, S_10_11) = recvCandidate
+        workCount(recvCandidate) = workCount(recvCandidate) + 1
+    End If
+End Sub
+
+' 指定したポジションを持つ最初のメンバー名を返す
+Private Function FindMemberWithPosition(members As Variant, _
+    daily As Object, positionName As String) As String
+    Dim i As Long, name As String
+    For i = LBound(members) To UBound(members)
+        name = CStr(members(i))
+        If daily("ポジション").Exists(name) Then
+            Dim posList As Collection: Set posList = daily("ポジション")(name)
+            Dim p As Variant
+            For Each p In posList
+                If CStr(p) = positionName Then
+                    FindMemberWithPosition = name
+                    Exit Function
+                End If
+            Next p
+        End If
+    Next i
+    FindMemberWithPosition = ""
+End Function
+
+' =============================================================
+' Phase B: 深夜スライド (slot 14..20 = 22時〜5時)
+'   前日の slot+1 の人を今日の slot に入れる
+'   = 「前日1時勤務の人は今回0時勤務」
+' =============================================================
+Private Sub ApplyNightSlide(assign() As String, members As Variant, _
+    roster As Object, daily As Object, positions As Object, _
+    prevDay As Object, workCount As Object)
+
+    Dim slotIdx As Long, col As Long
+    For slotIdx = S_22_23 To S_4_5   ' 14..20
+        For col = 0 To 1
+            ' 既に埋まってたらスキップ (通常このタイミングは未割当)
+            If Len(assign(col, slotIdx)) > 0 Then GoTo NEXT_N
+
+            ' 前日の slot+1 の人を今日の slot に
+            If slotIdx + 1 > N_SLOTS - 1 Then GoTo NEXT_N
+            Dim prevArr As Variant: prevArr = prevDay(slotIdx + 1)
+            Dim prevName As String: prevName = CStr(prevArr(col))
+            If Len(prevName) = 0 Then GoTo NEXT_N
+
+            ' その人が今日の名簿に存在し、ブロックされておらず、
+            ' 通信と受付で同時刻別人制約も満たすなら採用
+            If Not roster.Exists(prevName) Then GoTo NEXT_N
+            If IsBlocked(prevName, slotIdx, daily, positions, col) Then GoTo NEXT_N
+            If col = 1 And assign(0, slotIdx) = prevName Then GoTo NEXT_N
+
+            assign(col, slotIdx) = prevName
+            workCount(prevName) = workCount(prevName) + 1
+NEXT_N:
+        Next col
+    Next slotIdx
+End Sub
+
+' =============================================================
 ' 後処理: 12勤 と 17勤 の重複解消
 ' =============================================================
 Private Sub EnforceDistinct12_17(assign() As String, _
@@ -776,7 +981,7 @@ Private Sub EnforceDistinct12_17(assign() As String, _
             For i = LBound(members) To UBound(members)
                 alt = CStr(members(i))
                 If alt = assign(col, S_12_13) Then GoTo NEXT_ALT
-                If IsBlocked(alt, S_17_18, daily, positions) Then GoTo NEXT_ALT
+                If IsBlocked(alt, S_17_18, daily, positions, col) Then GoTo NEXT_ALT
                 If assign(1 - col, S_17_18) = alt Then GoTo NEXT_ALT
                 assign(col, S_17_18) = alt
                 Exit For
@@ -888,9 +1093,14 @@ End Function
 
 Private Function AllBlockedInDaytime(name As String, daily As Object, _
     positions As Object) As Boolean
+    ' 通信でも受付でも入れないなら True
     Dim i As Long
     For i = S_10_11 To S_17_18 - 1
-        If Not IsBlocked(name, i, daily, positions) Then
+        If Not IsBlocked(name, i, daily, positions, 0) Then
+            AllBlockedInDaytime = False
+            Exit Function
+        End If
+        If Not IsBlocked(name, i, daily, positions, 1) Then
             AllBlockedInDaytime = False
             Exit Function
         End If

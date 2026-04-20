@@ -63,7 +63,9 @@ TIME_MARKERS = [
 
 # ユーザー指定のポジション + 共通 duty
 # 各ポジションの × は後でマトリクスで設定 (ユーザー編集可)
-POSITIONS_INITIAL = [
+# 隊役割ポジション (ポジション1/2 のドロップダウンに出す)
+# 執務表の割当対象となる実働隊役割
+TEAM_POSITIONS = [
     "ポンプ隊",
     "救助隊",
     "はしご隊",
@@ -77,14 +79,20 @@ POSITIONS_INITIAL = [
     "署隊長伝令",
     "残留",
     "署隊本部支援員",
-    "警防力",
     "その他",
-    # 以下はチェックボックス連動 (当日チェックのチェックで自動適用)
+]
+
+# チェックボックス用ポジション (休暇/当直/食当/研修/警防力)
+# ユーザーはチェック入れるだけ、ドロップダウンには出さない
+CHECKBOX_POSITIONS = [
+    "休暇",
     "当直",
     "食当",
-    "休暇",
     "研修/出向",
+    "警防力",
 ]
+
+POSITIONS_INITIAL = TEAM_POSITIONS + CHECKBOX_POSITIONS
 
 # デフォルト × 設定 (ユーザー編集可、初期値)
 POSITION_DEFAULT_BLOCKS = {
@@ -101,6 +109,13 @@ POSITION_DEFAULT_BLOCKS = {
     "夜救急": {"18〜19", "19〜20", "20〜21", "21〜22", "22〜23",
              "23〜24", "0〜1", "1〜2", "2〜3", "3〜4", "4〜5", "5〜6",
              "6〜7", "7〜8", "8〜8:40"},
+}
+
+# カラム専属 (通信=0, 受付=1 のどちらかのみ割当可能なポジション)
+# デフォルト: 未定義 or 両方空欄 = 両方OK
+POSITION_COLUMN_LOCK = {
+    "残留": "comm",           # 通信のみ
+    "署隊長伝令": "recv",      # 受付のみ
 }
 
 # セルスタイル
@@ -184,46 +199,82 @@ def build_positions(ws):
     ws.title = "ポジション定義"
     ws["A1"] = "ポジション × 時間帯 の割当可否設定"
     ws["A1"].font = Font(bold=True, size=12)
-    ws["A2"] = ("× = そのポジションの人はこの時間帯に 執務表 を割り当てない。"
-                "空白 = 割当可。ここを編集するだけでルール変更可能。")
+    ws["A2"] = ("× = 割当禁止。空白 = 割当可。通信可/受付可 に ○ で専属化 (両方空なら両方OK)。"
+                "ここを編集するだけでルール変更可能。")
     ws["A2"].font = Font(italic=True, size=9)
 
-    # ヘッダ行 (行4)
+    # ヘッダ行 (行4): ポジション / 通信可 / 受付可 / 時間帯25列
     style_header(ws.cell(row=4, column=1, value="ポジション"))
-    for j, slot in enumerate(TIME_SLOTS, start=2):
+    style_header(ws.cell(row=4, column=2, value="通信可"))
+    style_header(ws.cell(row=4, column=3, value="受付可"))
+    for j, slot in enumerate(TIME_SLOTS, start=4):
         style_header(ws.cell(row=4, column=j, value=slot))
 
-    # データ行 (50行バッファ)
     N_POS_ROWS = 50
+    COL_COUNT = 3 + N_SLOTS  # A: 名前, B: 通信可, C: 受付可, D..: 時間帯25列
+
     for i in range(N_POS_ROWS):
         r = 5 + i
-        for c in range(1, 2 + N_SLOTS):
+        for c in range(1, 1 + COL_COUNT):
             cell = ws.cell(row=r, column=c)
             cell.border = BORDER_ALL
             cell.alignment = ALIGN_CENTER
             if c == 1:
                 cell.fill = FILL_INPUT
 
-    # 初期値を埋める
-    for i, pos in enumerate(POSITIONS_INITIAL):
-        r = 5 + i
-        ws.cell(row=r, column=1, value=pos)
+    # 隊役割ポジション (rows 5..5+len(TEAM_POSITIONS)-1)
+    row = 5
+    for pos in TEAM_POSITIONS:
+        ws.cell(row=row, column=1, value=pos)
+        # 通信可/受付可
+        lock = POSITION_COLUMN_LOCK.get(pos)
+        if lock == "comm":
+            ws.cell(row=row, column=2, value="○")
+            # 受付可 空欄 = 受付不可
+        elif lock == "recv":
+            ws.cell(row=row, column=3, value="○")
+        # 両方空 = 両方可 (デフォルト)
+        # 時間帯ブロック
         blocks = POSITION_DEFAULT_BLOCKS.get(pos, set())
-        for j, slot in enumerate(TIME_SLOTS, start=2):
+        for j, slot in enumerate(TIME_SLOTS, start=4):
             if slot in blocks:
-                c = ws.cell(row=r, column=j, value="×")
+                c = ws.cell(row=row, column=j, value="×")
                 c.fill = FILL_BLOCK
+        row += 1
 
-    # ドロップダウン: × / 空白 (他のマスへ)
-    dv = DataValidation(type="list", formula1='"×"', allow_blank=True)
-    ws.add_data_validation(dv)
-    dv.add(f"B5:{get_column_letter(1 + N_SLOTS)}{4 + N_POS_ROWS}")
+    # セパレータ行を1つ空けて チェックボックス用ポジション
+    sep_row = row
+    ws.cell(row=sep_row, column=1,
+            value="↓ 以下はチェックボックス連動 (当日チェックのチェックで自動付与)")
+    ws.cell(row=sep_row, column=1).font = Font(italic=True, color="888888", size=9)
+    ws.merge_cells(start_row=sep_row, start_column=1,
+                   end_row=sep_row, end_column=COL_COUNT)
+    row += 1
+
+    for pos in CHECKBOX_POSITIONS:
+        ws.cell(row=row, column=1, value=pos)
+        blocks = POSITION_DEFAULT_BLOCKS.get(pos, set())
+        for j, slot in enumerate(TIME_SLOTS, start=4):
+            if slot in blocks:
+                c = ws.cell(row=row, column=j, value="×")
+                c.fill = FILL_BLOCK
+        row += 1
+
+    # ドロップダウン: × / ○ / 空白 (編集可能領域)
+    dv_x = DataValidation(type="list", formula1='"×"', allow_blank=True)
+    ws.add_data_validation(dv_x)
+    dv_x.add(f"D5:{get_column_letter(COL_COUNT)}{4 + N_POS_ROWS}")
+    dv_o = DataValidation(type="list", formula1='"○"', allow_blank=True)
+    ws.add_data_validation(dv_o)
+    dv_o.add(f"B5:C{4 + N_POS_ROWS}")
 
     ws.column_dimensions["A"].width = 18
-    for j in range(2, 2 + N_SLOTS):
+    ws.column_dimensions["B"].width = 8
+    ws.column_dimensions["C"].width = 8
+    for j in range(4, 4 + N_SLOTS):
         ws.column_dimensions[get_column_letter(j)].width = 8
 
-    ws.freeze_panes = "B5"
+    ws.freeze_panes = "D5"
 
 
 # =============================================================
@@ -247,14 +298,19 @@ def build_daily_input(ws):
     ws["A4"].border = BORDER_ALL
     ws["B4"] = 0
     style_input(ws["B4"])
-    ws["C4"] = "※ チェック列は ○ を入れるだけ (ドロップダウン使用可)。ポジション列は複数個の重複割当に対応。"
+    ws["C4"] = "※ チェック列は ○ を入れるだけ。ポジション1/2 は警防態勢の隊役割のみ。"
     ws["C4"].font = Font(italic=True, size=9)
-    ws.merge_cells("C4:L4")
+    ws.merge_cells("C4:N4")
 
     # マトリクスヘッダ (行6)
+    # A: No, B: 氏名
+    # C-G: チェックボックス5個 (休暇/当直/食当/研修/警防力)
+    # H-I: ポジション1/2 (隊役割のみ)
+    # J-M: 除外1-2 (から/まで)
+    # N: 備考
     headers = [
         "No", "氏名",
-        "休暇", "当直", "食当",
+        "休暇", "当直", "食当", "研修", "警防力",
         "ポジション1", "ポジション2",
         "除外1 から", "除外1 まで",
         "除外2 から", "除外2 まで",
@@ -266,71 +322,67 @@ def build_daily_input(ws):
         c.font = Font(bold=True, size=11)
 
     N = 30
-    # データ行 (高さを上げて大きく、クリックしやすく)
     ws.row_dimensions[6].height = 28
     for i in range(N):
         r = 7 + i
         ws.row_dimensions[r].height = 26
         roster_row = 2 + i
-        # No
         ws.cell(row=r, column=1, value=i + 1).alignment = ALIGN_CENTER
         ws.cell(row=r, column=1).border = BORDER_ALL
-        # 氏名 (formula)
         nm = ws.cell(row=r, column=2,
                      value=f'=IF(名簿!B{roster_row}="","",名簿!B{roster_row})')
         nm.border = BORDER_ALL
         nm.alignment = ALIGN_LEFT
-        # チェックボックス3列 (C=休暇, D=当直, E=食当)
-        for c in (3, 4, 5):
+        # チェックボックス5列 (C=休暇, D=当直, E=食当, F=研修, G=警防力)
+        for c in (3, 4, 5, 6, 7):
             cell = ws.cell(row=r, column=c)
             cell.border = BORDER_ALL
             cell.alignment = ALIGN_CENTER
-            cell.fill = PatternFill("solid", fgColor="FFFACD")  # 薄い黄色で目立たせる
-            cell.font = Font(size=16, bold=True)  # 大きな文字
-        # ポジション1/2
-        for c in (6, 7):
-            cell = ws.cell(row=r, column=c)
-            cell.border = BORDER_ALL
-            cell.alignment = ALIGN_CENTER
-            cell.fill = FILL_INPUT
-        # 除外1/2 (開始・終了)
-        for c in (8, 9, 10, 11):
+            cell.fill = PatternFill("solid", fgColor="FFFACD")
+            cell.font = Font(size=16, bold=True)
+        # ポジション1/2 (H, I)
+        for c in (8, 9):
             cell = ws.cell(row=r, column=c)
             cell.border = BORDER_ALL
             cell.alignment = ALIGN_CENTER
             cell.fill = FILL_INPUT
-        # 備考
-        ws.cell(row=r, column=12).border = BORDER_ALL
+        # 除外1/2 (J, K, L, M)
+        for c in (10, 11, 12, 13):
+            cell = ws.cell(row=r, column=c)
+            cell.border = BORDER_ALL
+            cell.alignment = ALIGN_CENTER
+            cell.fill = FILL_INPUT
+        # 備考 (N)
+        ws.cell(row=r, column=14).border = BORDER_ALL
 
-    # チェックボックス列 ドロップダウン (○)
+    # チェックボックス ドロップダウン (C..G)
     dv_check = DataValidation(type="list", formula1='"○"', allow_blank=True)
     ws.add_data_validation(dv_check)
-    dv_check.add(f"C7:E{6 + N}")
+    dv_check.add(f"C7:G{6 + N}")
 
-    # ポジション ドロップダウン
+    # ポジション ドロップダウン (H, I) — 隊役割のみ (TEAM_POSITIONS の行 5..5+len-1)
+    team_end_row = 5 + len(TEAM_POSITIONS) - 1
     dv_pos = DataValidation(type="list",
-                            formula1="=ポジション定義!$A$5:$A$54",
+                            formula1=f"=ポジション定義!$A$5:$A${team_end_row}",
                             allow_blank=True)
     ws.add_data_validation(dv_pos)
-    dv_pos.add(f"F7:G{6 + N}")
+    dv_pos.add(f"H7:I{6 + N}")
 
-    # 除外時間帯 ドロップダウン (時刻境界で指定: 9時から17時 = 9〜17まで割当禁止)
+    # 除外時間帯 ドロップダウン (J..M)
     marker_list = ",".join(TIME_MARKERS)
     dv_slot = DataValidation(type="list", formula1=f'"{marker_list}"', allow_blank=True)
     ws.add_data_validation(dv_slot)
-    dv_slot.add(f"H7:K{6 + N}")
+    dv_slot.add(f"J7:M{6 + N}")
 
     ws.column_dimensions["A"].width = 5
     ws.column_dimensions["B"].width = 16
-    # チェックボックス列は大きめ
-    ws.column_dimensions["C"].width = 8
-    ws.column_dimensions["D"].width = 8
-    ws.column_dimensions["E"].width = 8
-    ws.column_dimensions["F"].width = 14
-    ws.column_dimensions["G"].width = 14
-    for c in "HIJK":
+    for c in "CDEFG":
+        ws.column_dimensions[c].width = 7
+    ws.column_dimensions["H"].width = 14
+    ws.column_dimensions["I"].width = 14
+    for c in "JKLM":
         ws.column_dimensions[c].width = 10
-    ws.column_dimensions["L"].width = 22
+    ws.column_dimensions["N"].width = 22
 
     ws.freeze_panes = "C7"
 

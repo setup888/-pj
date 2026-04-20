@@ -56,8 +56,8 @@ POSITIONS: Dict[str, set] = {
     "救助隊": set(),
     "はしご隊": set(),
     "救急隊": set(range(N)),
-    "日中救急": set(range(0, 10)),   # 8:40-18 ×
-    "夜救急": set(range(10, N)),     # 18-翌8:40 ×
+    "日中救急": set(range(0, 10)),
+    "夜救急": set(range(10, N)),
     "伝令": set(),
     "通信担当": set(),
     "情報担当": set(),
@@ -66,10 +66,17 @@ POSITIONS: Dict[str, set] = {
     "残留": set(),
     "署隊本部支援員": set(),
     "その他": set(),
-    "当直": {10, 11, 22, 23},        # 18-19, 19-20, 6-7, 7-8
-    "食当": {6, 7, 8},               # 14-17
+    "当直": {10, 11, 22, 23},
+    "食当": {6, 7, 8},
     "休暇": set(range(N)),
     "研修/出向": set(range(N)),
+    "警防力": set(range(N)),
+}
+
+# カラム専属: "comm" = 通信のみ, "recv" = 受付のみ
+POSITION_COL_LOCK: Dict[str, str] = {
+    "残留": "comm",
+    "署隊長伝令": "recv",
 }
 
 
@@ -84,11 +91,21 @@ class DailyInput:
     exclusions: Dict[str, List[Tuple[int, int]]] = field(default_factory=dict)
 
 
-def is_blocked(name: str, slot: int, daily: DailyInput) -> bool:
+def is_blocked(name: str, slot: int, daily: DailyInput, col: int = -1) -> bool:
     # 複数ポジションの × を合算
     for pos in daily.positions.get(name, []):
         if pos in POSITIONS and slot in POSITIONS[pos]:
             return True
+
+    # カラム専属チェック
+    if col >= 0:
+        for pos in daily.positions.get(name, []):
+            lock = POSITION_COL_LOCK.get(pos)
+            if lock == "comm" and col == 1:
+                return True
+            if lock == "recv" and col == 0:
+                return True
+
     for s, e in daily.exclusions.get(name, []):
         if s <= slot <= e:
             return True
@@ -143,13 +160,15 @@ def score(name, col, slot, prev_day, assign, work_count, roster):
             s += 500
     if slot == S_17_18 and assign[col][S_12_13] == name: s += 500
     if slot == S_12_13 and assign[col][S_17_18] == name: s += 500
-    if slot > 0 and assign[col][slot - 1] == name: s += 50
-    if slot < N - 1 and assign[col][slot + 1] == name: s += 50
+    # 近接ペナルティ ±4
+    for dist, pen in [(1, 200), (2, 100), (3, 50), (4, 30)]:
+        if slot - dist >= 0 and assign[col][slot - dist] == name: s += pen
+        if slot + dist < N and assign[col][slot + dist] == name: s += pen
     return s
 
 
 def pick(col, slot, members, daily, prev_day, assign, work_count, roster):
-    cands = [n for n in members if not is_blocked(n, slot, daily)]
+    cands = [n for n in members if not is_blocked(n, slot, daily, col)]
     if col == 1:
         cands = [n for n in cands if assign[0][slot] != n]
     if not cands: return ""
@@ -169,27 +188,109 @@ def slot_order():
 
 
 def all_blocked_daytime(name, daily):
-    return all(is_blocked(name, i, daily) for i in range(S_10_11, S_17_18))
+    # 通信でも受付でも入れないなら True
+    return all(
+        is_blocked(name, i, daily, 0) and is_blocked(name, i, daily, 1)
+        for i in range(S_10_11, S_17_18)
+    )
+
+
+def find_member_with_position(members, daily, position_name):
+    for n in members:
+        if position_name in daily.positions.get(n, []):
+            return n
+    return None
+
+
+def apply_fixed_slots(assign, members, daily, work_count):
+    """Phase A: 残留 → 通信 slot 0,1 / 署隊長伝令 → 受付 slot 1,24 / 伝令or通信担当 → slot 2"""
+    zan = find_member_with_position(members, daily, "残留")
+    if zan:
+        if not is_blocked(zan, 0, daily, 0):
+            assign[0][0] = zan
+            work_count[zan] = work_count.get(zan, 0) + 1
+        if not is_blocked(zan, 1, daily, 0):
+            assign[0][1] = zan
+            work_count[zan] = work_count.get(zan, 0) + 1
+
+    de = find_member_with_position(members, daily, "署隊長伝令")
+    if de:
+        if not is_blocked(de, 1, daily, 1):
+            assign[1][1] = de
+            work_count[de] = work_count.get(de, 0) + 1
+        if not is_blocked(de, 24, daily, 1):
+            assign[1][24] = de
+            work_count[de] = work_count.get(de, 0) + 1
+
+    den = find_member_with_position(members, daily, "伝令")
+    tsu = find_member_with_position(members, daily, "通信担当")
+    if den and not is_blocked(den, S_10_11, daily, 0):
+        assign[0][S_10_11] = den
+        work_count[den] = work_count.get(den, 0) + 1
+    elif tsu and not is_blocked(tsu, S_10_11, daily, 0):
+        assign[0][S_10_11] = tsu
+        work_count[tsu] = work_count.get(tsu, 0) + 1
+
+    recv = None
+    if tsu and tsu != assign[0][S_10_11]:
+        recv = tsu
+    elif den and den != assign[0][S_10_11]:
+        recv = den
+    if recv and not is_blocked(recv, S_10_11, daily, 1):
+        assign[1][S_10_11] = recv
+        work_count[recv] = work_count.get(recv, 0) + 1
+
+
+def apply_night_slide(assign, members, daily, prev_day, roster, work_count):
+    """Phase B: slot 14..20 (22時〜5時) = 前日 slot+1 を上に1つスライド"""
+    for slot in range(S_22_23, S_4_5 + 1):  # 14..20
+        for col in (0, 1):
+            if assign[col][slot]:
+                continue
+            if slot + 1 >= N: continue
+            prev_name = prev_day.get(slot + 1, ("", ""))[col]
+            if not prev_name: continue
+            if prev_name not in roster: continue
+            if is_blocked(prev_name, slot, daily, col): continue
+            if col == 1 and assign[0][slot] == prev_name: continue
+            assign[col][slot] = prev_name
+            work_count[prev_name] = work_count.get(prev_name, 0) + 1
 
 
 def generate(roster, daily, prev_day):
-    members = [n for n in roster
-               if any(not is_blocked(n, i, daily) for i in range(N))]
+    members = [
+        n for n in roster
+        if any(
+            not is_blocked(n, i, daily, 0) or not is_blocked(n, i, daily, 1)
+            for i in range(N)
+        )
+    ]
     assign = [[""] * N, [""] * N]
     work_count = {m: 0 for m in members}
+
+    # Phase A: 固定枠
+    apply_fixed_slots(assign, members, daily, work_count)
+
+    # Phase B: 深夜スライド
+    apply_night_slide(assign, members, daily, prev_day, roster, work_count)
+
+    # Phase C: 残りスコアリング
     for slot in slot_order():
         for col in (0, 1):
             if col == 1 and slot == 0:
-                assign[1][0] = ""   # 受付 8:40〜9 は斜線
+                assign[1][0] = ""
                 continue
+            if assign[col][slot]:
+                continue  # 固定枠・スライドで埋まってる
             assign[col][slot] = pick(col, slot, members, daily, prev_day,
                                      assign, work_count, roster)
+
     # 12/17 distinct
     for col in (0, 1):
         if assign[col][S_12_13] and assign[col][S_12_13] == assign[col][S_17_18]:
             for alt in members:
                 if alt != assign[col][S_12_13] \
-                        and not is_blocked(alt, S_17_18, daily) \
+                        and not is_blocked(alt, S_17_18, daily, col) \
                         and assign[1-col][S_17_18] != alt:
                     assign[col][S_17_18] = alt
                     break
@@ -252,26 +353,26 @@ def main():
     daily1 = DailyInput(
         date=date(2026, 4, 16),
         positions={
-            "原田 陽一郎": ["ポンプ隊", "当直"],          # 当直士長兼ポンプ
-            "永井 恵理": ["残留"],
-            "梅村 侑志": ["救助隊", "食当"],              # 救助+食当
-            "村山 哲也": ["食当"],
-            "小西 隼人": ["ポンプ隊"],
+            "原田 陽一郎": ["ポンプ隊"],
+            "梅村 侑志": ["救助隊"],
+            "小西 隼人": ["ポンプ隊", "当直"],
             "鍋谷 昇": ["はしご隊"],
-            "長田 智紀": ["伝令"],
-            "和田 浩司": ["伝令"],
+            "村山 哲也": ["食当"],
+            "長田 智紀": ["伝令"],            # 10-11固定候補
+            "和田 浩司": ["通信担当"],         # 10-11固定候補
             "長友 亮澄": ["情報員"],
-            "尾坂 友梨": ["通信担当"],
-            "山川 敦史": ["情報担当"],
-            "金子 卓磨": ["日中救急", "残留"],            # 18時で残留に交代
+            "尾坂 友梨": ["情報担当"],
+            "山川 敦史": ["残留"],            # 通信専属、朝2時間固定
+            "金子 卓磨": ["署隊長伝令"],       # 受付専属、朝&翌朝受付固定
+            "永井 恵理": ["ポンプ隊"],
             "中村 太一": ["救助隊"],
-            "藤井 惇平": ["ポンプ隊"],
-            "伊藤 祥輝": ["夜救急"],                    # 夜救急
+            "藤井 惇平": ["はしご隊"],
+            "伊藤 祥輝": ["夜救急"],
             "飯塚 佑介": ["その他"],
-            "後藤 直人": ["署隊長伝令"],
+            "後藤 直人": ["署隊本部支援員"],
         },
         exclusions={
-            "鍋谷 昇": [marker_range("9時", "13時")],  # 方面訓練 9時〜13時
+            "鍋谷 昇": [marker_range("9時", "13時")],  # 方面訓練
         },
     )
     prev_day = {i: ("", "") for i in range(N)}
