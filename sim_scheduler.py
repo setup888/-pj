@@ -179,11 +179,6 @@ def score(name, col, slot, prev_day, assign, work_count, roster, daily=None):
     if daily and is_exclusive_for_col(name, col, daily):
         s -= 40
 
-    # (f3) 食当者の 10-14時優先
-    if daily and S_10_11 <= slot <= S_14_15 - 1:
-        if "食当" in daily.positions.get(name, []):
-            s -= 60
-
     if is_late_night(slot):
         if late_count(name, assign, slot) >= 1:
             s += 500

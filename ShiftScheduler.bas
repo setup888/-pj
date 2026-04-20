@@ -798,16 +798,6 @@ Private Function ScoreCandidate(name As String, col As Long, slotIdx As Long, _
         End If
     End If
 
-    ' (f3) 食当者は 10-14時 (slot 2..5) を優先
-    '   14時以降は食当×のため日中勤務の機会が 10-14 に限られる
-    If Not daily Is Nothing Then
-        If slotIdx >= S_10_11 And slotIdx <= S_14_15 - 1 Then
-            If HasPosition(name, "食当", daily) Then
-                score = score - 60
-            End If
-        End If
-    End If
-
     ' (g) 深夜(22-4時)は一人1回まで
     If IsLateNight(slotIdx) Then
         If LateNightCount(name, assign, slotIdx) >= 1 Then
