@@ -337,7 +337,7 @@ def validate(assign, roster, daily, prev_day):
     for i in range(N):
         for col in (0, 1):
             if col == 1 and i == 0:
-                continue  # 受付 8:40〜9 は斜線
+                continue
             if not assign[col][i]:
                 msgs.append(f"{TIME_SLOTS[i]}/{'通信' if col == 0 else '受付'} 空欄")
     covered = defaultdict(int)
@@ -345,12 +345,30 @@ def validate(assign, roster, daily, prev_day):
         for col in (0, 1):
             if assign[col][i]: covered[assign[col][i]] += 1
     for n in roster:
-        if covered[n] == 0 and not all_blocked_daytime(n, daily):
+        # 消防士は構造的に日中未勤務になりやすいので警告対象外
+        if (covered[n] == 0
+                and not all_blocked_daytime(n, daily)
+                and roster.get(n) != "消防士"):
             msgs.append(f"{n} は 10-17時未勤務")
+
+    # 固定枠由来の前日重複は警告除外
+    fixed_exempt = set()
+    for n, poss in daily.positions.items():
+        if "残留" in poss:
+            fixed_exempt.add((0, 0, n))
+            fixed_exempt.add((1, 0, n))
+        if "署隊長伝令" in poss:
+            fixed_exempt.add((1, 1, n))
+            fixed_exempt.add((24, 1, n))
+
     for i in range(S_20_21, N):
         for col in (0, 1):
-            if assign[col][i] and prev_day.get(i, ("", ""))[col] == assign[col][i]:
-                msgs.append(f"{TIME_SLOTS[i]}/{'通信' if col == 0 else '受付'} 前日と同じ ({assign[col][i]})")
+            cur = assign[col][i]
+            prev = prev_day.get(i, ("", ""))[col]
+            if cur and prev == cur and (i, col, cur) not in fixed_exempt:
+                msgs.append(
+                    f"{TIME_SLOTS[i]}/{'通信' if col == 0 else '受付'} 前日と同じ ({cur})"
+                )
     return msgs
 
 

@@ -1178,22 +1178,85 @@ NEXT_CHECK:
     Next i
     For Each k In roster.Keys
         ' 10-17時 全スロット × の人は警告しない
-        If covered(CStr(k)) = 0 And Not AllBlockedInDaytime(CStr(k), daily, positions) Then
+        ' 消防士階級は数学的に日中未勤務になりやすいので警告対象外
+        If covered(CStr(k)) = 0 _
+                And Not AllBlockedInDaytime(CStr(k), daily, positions) _
+                And CStr(roster(k)) <> "消防士" Then
             msgs = msgs & " - " & CStr(k) & " は 10-17時に未勤務" & vbCrLf
         End If
     Next k
 
+    ' 夜20時以降 前日同時刻と同一人物 (固定枠由来は除外)
+    Dim fixedExempt As Object: Set fixedExempt = BuildFixedExemptSet(daily)
     For i = S_20_21 To N_SLOTS - 1
         For col = 0 To 1
             If Len(assign(col, i)) > 0 And assign(col, i) = prevDay(i)(col) Then
-                msgs = msgs & " - " & slots(i) & " / " & _
-                       IIf(col = 0, "通信", "受付") & _
-                       " が前日と同じ (" & assign(col, i) & ")" & vbCrLf
+                ' 固定枠由来 (残留 8:40-10通信, 署隊長伝令 受付9-10/8-8:40) はスキップ
+                Dim exemptKey As String: exemptKey = i & "|" & col & "|" & assign(col, i)
+                If Not fixedExempt.Exists(exemptKey) Then
+                    msgs = msgs & " - " & slots(i) & " / " & _
+                           IIf(col = 0, "通信", "受付") & _
+                           " が前日と同じ (" & assign(col, i) & ")" & vbCrLf
+                End If
             End If
         Next col
     Next i
 
+    ' 12勤と17勤が同じ
+    For col = 0 To 1
+        If Len(assign(col, S_12_13)) > 0 And assign(col, S_12_13) = assign(col, S_17_18) Then
+            msgs = msgs & " - 12勤と17勤が同じ人物 (" & assign(col, S_12_13) & ")" & vbCrLf
+        End If
+    Next col
+
     Validate = msgs
+End Function
+
+' 固定枠 (残留・署隊長伝令) で配置された slot+col+name の組合せ
+' これらは前日と同じ人物が割当られても自然なので警告除外
+Private Function BuildFixedExemptSet(daily As Object) As Object
+    Dim s As Object: Set s = CreateObject("Scripting.Dictionary")
+    s.CompareMode = vbTextCompare
+    ' 残留 → 通信 slot 0, 1
+    Dim names As Variant
+    names = FindAllMembersWithPosition(daily, "残留")
+    Dim name As Variant
+    For Each name In names
+        s("0|0|" & CStr(name)) = True
+        s("1|0|" & CStr(name)) = True
+    Next name
+    ' 署隊長伝令 → 受付 slot 1, 24
+    names = FindAllMembersWithPosition(daily, "署隊長伝令")
+    For Each name In names
+        s("1|1|" & CStr(name)) = True
+        s("24|1|" & CStr(name)) = True
+    Next name
+    Set BuildFixedExemptSet = s
+End Function
+
+Private Function FindAllMembersWithPosition(daily As Object, _
+    positionName As String) As Variant
+    Dim arr() As String
+    ReDim arr(0 To 30)
+    Dim n As Long: n = 0
+    Dim k As Variant
+    For Each k In daily("ポジション").Keys
+        Dim posList As Collection: Set posList = daily("ポジション")(k)
+        Dim p As Variant
+        For Each p In posList
+            If CStr(p) = positionName Then
+                arr(n) = CStr(k)
+                n = n + 1
+                Exit For
+            End If
+        Next p
+    Next k
+    If n = 0 Then
+        FindAllMembersWithPosition = Array()
+        Exit Function
+    End If
+    ReDim Preserve arr(0 To n - 1)
+    FindAllMembersWithPosition = arr
 End Function
 
 Private Function AllBlockedInDaytime(name As String, daily As Object, _
