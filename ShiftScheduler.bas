@@ -678,18 +678,39 @@ Private Function PickAssignee(col As Long, slotIdx As Long, _
     positions As Object, prevDay As Object, _
     assign() As String, workCount As Object) As String
 
-    Dim candidates As Collection: Set candidates = New Collection
+    ' 2段階候補選別:
+    '   Strict: 4時間(±4スロット)以内に同一人物なし
+    '   Relaxed: Strict で 0名なら ±2 まで緩和
+    '   Final: それでも 0 なら制約外してスコアリング
+    Dim strict As Collection: Set strict = New Collection
+    Dim relaxed As Collection: Set relaxed = New Collection
+    Dim anyOk As Collection: Set anyOk = New Collection
     Dim i As Long, name As String
     For i = LBound(members) To UBound(members)
         name = CStr(members(i))
-        If Not IsBlocked(name, slotIdx, daily, positions, col) Then
-            If col = 1 Then
-                If assign(0, slotIdx) = name Then GoTo SKIP_ADD
-            End If
-            candidates.Add name
+        If IsBlocked(name, slotIdx, daily, positions, col) Then GoTo SKIP_ADD
+        If col = 1 And assign(0, slotIdx) = name Then GoTo SKIP_ADD
+
+        anyOk.Add name
+
+        ' 近接チェック: 直前直後 同じ col に居ないか
+        Dim nearDist As Long: nearDist = MinGapSameCol(name, col, slotIdx, assign)
+        If nearDist >= 4 Then
+            strict.Add name
+        ElseIf nearDist >= 2 Then
+            relaxed.Add name
         End If
 SKIP_ADD:
     Next i
+
+    Dim candidates As Collection
+    If strict.Count > 0 Then
+        Set candidates = strict
+    ElseIf relaxed.Count > 0 Then
+        Set candidates = relaxed
+    Else
+        Set candidates = anyOk
+    End If
 
     If candidates.Count = 0 Then
         PickAssignee = ""
@@ -701,7 +722,8 @@ SKIP_ADD:
     Dim c As Variant
     For Each c In candidates
         Dim s As Double
-        s = ScoreCandidate(CStr(c), col, slotIdx, prevDay, assign, workCount, roster)
+        s = ScoreCandidate(CStr(c), col, slotIdx, prevDay, assign, workCount, _
+                           roster, daily, positions)
         If s < bestScore Then
             bestScore = s
             bestName = CStr(c)
@@ -716,7 +738,9 @@ End Function
 
 Private Function ScoreCandidate(name As String, col As Long, slotIdx As Long, _
     prevDay As Object, assign() As String, workCount As Object, _
-    roster As Object) As Double
+    roster As Object, _
+    Optional daily As Object = Nothing, _
+    Optional positions As Object = Nothing) As Double
     Dim score As Double: score = 0
 
     ' (a) 総勤務回数 (バランス)
@@ -766,6 +790,24 @@ Private Function ScoreCandidate(name As String, col As Long, slotIdx As Long, _
         End If
     End If
 
+    ' (f2) 専属ポジション保持者は自分のカラム内でローテ優先
+    '   例: 署隊長伝令(受付専属) が受付ローテに外れないようにボーナス
+    If Not daily Is Nothing And Not positions Is Nothing Then
+        If IsExclusiveForCol(name, col, daily, positions) Then
+            score = score - 40
+        End If
+    End If
+
+    ' (f3) 食当者は 10-14時 (slot 2..5) を優先
+    '   14時以降は食当×のため日中勤務の機会が 10-14 に限られる
+    If Not daily Is Nothing Then
+        If slotIdx >= S_10_11 And slotIdx <= S_14_15 - 1 Then
+            If HasPosition(name, "食当", daily) Then
+                score = score - 60
+            End If
+        End If
+    End If
+
     ' (g) 深夜(22-4時)は一人1回まで
     If IsLateNight(slotIdx) Then
         If LateNightCount(name, assign, slotIdx) >= 1 Then
@@ -805,6 +847,69 @@ End Function
 
 Private Function IsLateNight(slotIdx As Long) As Boolean
     IsLateNight = (slotIdx >= S_22_23 And slotIdx <= S_4_5 - 1)
+End Function
+
+' name が指定ポジションを今日持っているか
+Private Function HasPosition(name As String, positionName As String, _
+    daily As Object) As Boolean
+    If Not daily("ポジション").Exists(name) Then
+        HasPosition = False
+        Exit Function
+    End If
+    Dim posList As Collection: Set posList = daily("ポジション")(name)
+    Dim p As Variant
+    For Each p In posList
+        If CStr(p) = positionName Then
+            HasPosition = True
+            Exit Function
+        End If
+    Next p
+    HasPosition = False
+End Function
+
+' name が持つポジションのいずれかが col 専属なら True
+Private Function IsExclusiveForCol(name As String, col As Long, _
+    daily As Object, positions As Object) As Boolean
+    If Not daily("ポジション").Exists(name) Then
+        IsExclusiveForCol = False
+        Exit Function
+    End If
+    Dim posList As Collection: Set posList = daily("ポジション")(name)
+    Dim p As Variant
+    For Each p In posList
+        Dim pn As String: pn = CStr(p)
+        If col = 0 And positions.Exists(pn & ":recv") Then
+            ' 受付不可 = 通信専属 (そのポジションが 通信可=○ かつ 受付可=空 のとき)
+            If CBool(positions(pn & ":comm")) And Not CBool(positions(pn & ":recv")) Then
+                IsExclusiveForCol = True
+                Exit Function
+            End If
+        End If
+        If col = 1 And positions.Exists(pn & ":comm") Then
+            If CBool(positions(pn & ":recv")) And Not CBool(positions(pn & ":comm")) Then
+                IsExclusiveForCol = True
+                Exit Function
+            End If
+        End If
+    Next p
+    IsExclusiveForCol = False
+End Function
+
+' 指定人物 name が同じ col に割当されている最も近いスロットとの距離
+' 1 以上の最小距離を返す。見つからなければ 999。
+Private Function MinGapSameCol(name As String, col As Long, slotIdx As Long, _
+    assign() As String) As Long
+    Dim minGap As Long: minGap = 999
+    Dim i As Long
+    For i = 0 To N_SLOTS - 1
+        If i = slotIdx Then GoTo NEXT_I
+        If assign(col, i) = name Then
+            Dim d As Long: d = Abs(i - slotIdx)
+            If d < minGap Then minGap = d
+        End If
+NEXT_I:
+    Next i
+    MinGapSameCol = minGap
 End Function
 
 Private Function DaytimeCount(name As String, assign() As String, _

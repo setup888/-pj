@@ -43,6 +43,7 @@ def marker_range(from_label: str, to_label: str) -> Tuple[int, int]:
 
 S_10_11 = 2
 S_12_13 = 4
+S_14_15 = 6
 S_17_18 = 9
 S_18_19 = 10
 S_20_21 = 12
@@ -133,7 +134,25 @@ def late_count(name, assign, cur):
     return cnt
 
 
-def score(name, col, slot, prev_day, assign, work_count, roster):
+def min_gap_same_col(name, col, slot, assign):
+    min_g = 999
+    for i in range(N):
+        if i == slot: continue
+        if assign[col][i] == name:
+            d = abs(i - slot)
+            if d < min_g: min_g = d
+    return min_g
+
+
+def is_exclusive_for_col(name, col, daily):
+    for pos in daily.positions.get(name, []):
+        lock = POSITION_COL_LOCK.get(pos)
+        if col == 0 and lock == "comm": return True
+        if col == 1 and lock == "recv": return True
+    return False
+
+
+def score(name, col, slot, prev_day, assign, work_count, roster, daily=None):
     s = work_count.get(name, 0) * 10
 
     # 階級による 通信/受付 優先
@@ -155,6 +174,16 @@ def score(name, col, slot, prev_day, assign, work_count, roster):
     if S_10_11 <= slot <= S_17_18 - 1:
         if daytime_count(name, assign, slot) == 0:
             s -= 200
+
+    # (f2) 専属カラム保持者ローテ優先
+    if daily and is_exclusive_for_col(name, col, daily):
+        s -= 40
+
+    # (f3) 食当者の 10-14時優先
+    if daily and S_10_11 <= slot <= S_14_15 - 1:
+        if "食当" in daily.positions.get(name, []):
+            s -= 60
+
     if is_late_night(slot):
         if late_count(name, assign, slot) >= 1:
             s += 500
@@ -168,13 +197,19 @@ def score(name, col, slot, prev_day, assign, work_count, roster):
 
 
 def pick(col, slot, members, daily, prev_day, assign, work_count, roster):
-    cands = [n for n in members if not is_blocked(n, slot, daily, col)]
+    base = [n for n in members if not is_blocked(n, slot, daily, col)]
     if col == 1:
-        cands = [n for n in cands if assign[0][slot] != n]
-    if not cands: return ""
+        base = [n for n in base if assign[0][slot] != n]
+    if not base: return ""
+
+    # 2段階候補フィルタ: Strict (gap≥4) → Relaxed (gap≥2) → All
+    strict = [n for n in base if min_gap_same_col(n, col, slot, assign) >= 4]
+    relaxed = [n for n in base if min_gap_same_col(n, col, slot, assign) >= 2]
+    cands = strict if strict else (relaxed if relaxed else base)
+
     best_n, best_s = "", float("inf")
     for n in cands:
-        sc = score(n, col, slot, prev_day, assign, work_count, roster)
+        sc = score(n, col, slot, prev_day, assign, work_count, roster, daily)
         if sc < best_s:
             best_s, best_n = sc, n
     if best_n:
