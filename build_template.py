@@ -306,14 +306,15 @@ def build_daily_input(ws):
     # A: No, B: 氏名
     # C-G: チェックボックス5個 (休暇/当直/食当/研修/警防力)
     # H-I: ポジション1/2 (隊役割のみ)
-    # J-M: 除外1-2 (から/まで)
-    # N: 備考
+    # J-O: 除外1-3 (から/まで)
+    # P: 備考
     headers = [
         "No", "氏名",
         "休暇", "当直", "食当", "研修", "警防力",
         "ポジション1", "ポジション2",
         "除外1 から", "除外1 まで",
         "除外2 から", "除外2 まで",
+        "除外3 から", "除外3 まで",
         "備考",
     ]
     for i, h in enumerate(headers, start=1):
@@ -346,14 +347,14 @@ def build_daily_input(ws):
             cell.border = BORDER_ALL
             cell.alignment = ALIGN_CENTER
             cell.fill = FILL_INPUT
-        # 除外1/2 (J, K, L, M)
-        for c in (10, 11, 12, 13):
+        # 除外1/2/3 (J..O)
+        for c in (10, 11, 12, 13, 14, 15):
             cell = ws.cell(row=r, column=c)
             cell.border = BORDER_ALL
             cell.alignment = ALIGN_CENTER
             cell.fill = FILL_INPUT
-        # 備考 (N)
-        ws.cell(row=r, column=14).border = BORDER_ALL
+        # 備考 (P)
+        ws.cell(row=r, column=16).border = BORDER_ALL
 
     # チェックボックス ドロップダウン (C..G)
     dv_check = DataValidation(type="list", formula1='"○"', allow_blank=True)
@@ -368,11 +369,11 @@ def build_daily_input(ws):
     ws.add_data_validation(dv_pos)
     dv_pos.add(f"H7:I{6 + N}")
 
-    # 除外時間帯 ドロップダウン (J..M)
+    # 除外時間帯 ドロップダウン (J..O)
     marker_list = ",".join(TIME_MARKERS)
     dv_slot = DataValidation(type="list", formula1=f'"{marker_list}"', allow_blank=True)
     ws.add_data_validation(dv_slot)
-    dv_slot.add(f"J7:M{6 + N}")
+    dv_slot.add(f"J7:O{6 + N}")
 
     ws.column_dimensions["A"].width = 5
     ws.column_dimensions["B"].width = 16
@@ -380,9 +381,9 @@ def build_daily_input(ws):
         ws.column_dimensions[c].width = 7
     ws.column_dimensions["H"].width = 14
     ws.column_dimensions["I"].width = 14
-    for c in "JKLM":
+    for c in "JKLMNO":
         ws.column_dimensions[c].width = 10
-    ws.column_dimensions["N"].width = 22
+    ws.column_dimensions["P"].width = 22
 
     ws.freeze_panes = "C7"
 

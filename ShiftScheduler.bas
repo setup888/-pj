@@ -400,7 +400,8 @@ Private Function LoadDailyInput(slots() As String) As Object
     '   H: ポジション1, I: ポジション2  (隊役割のみ)
     '   J: 除外1 から, K: 除外1 まで
     '   L: 除外2 から, M: 除外2 まで
-    '   N: 備考
+    '   N: 除外3 から, O: 除外3 まで
+    '   P: 備考
     ' 除外時間帯は時刻境界で指定 (例: 9時 から 17時 = slot 1〜8 ブロック)
     Dim d As Object: Set d = CreateObject("Scripting.Dictionary")
     d.CompareMode = vbTextCompare
@@ -442,10 +443,10 @@ Private Function LoadDailyInput(slots() As String) As Object
             Set posByName(name) = posList
         End If
 
-        ' 除外1/2: J=10, K=11, L=12, M=13 (時刻境界→スロット範囲変換)
+        ' 除外1/2/3: J..O = 10..15 (時刻境界→スロット範囲変換)
         Dim k As Long, coll As Collection
         Set coll = Nothing
-        For k = 0 To 1
+        For k = 0 To 2
             Dim sCol As Long, eCol As Long
             sCol = 10 + k * 2
             eCol = sCol + 1
